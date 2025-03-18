@@ -1,0 +1,10 @@
+[package]
+name = "slate"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5.32", features = ["derive"] }
+libc = "0.2.171"
+rusqlite = { version = "0.34.0", features = ["bundled"] }
+zstd = "0.13.3"
