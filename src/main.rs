@@ -1,10 +1,14 @@
 mod daemon;
+mod db;
+
+use std::path::PathBuf;
 
 use daemon::send_command;
 use daemon::start_daemon;
 use daemon::stop_daemon;
 
 use clap::{Parser, Subcommand};
+use db::Database;
 
 #[derive(Parser, Debug)]
 #[command(name = "slate", about = "manage files and clipboards across devices")]
@@ -21,12 +25,17 @@ enum SlateCommand {
     Paste,
     /// upload a file
     Upload {
+        /// file name for the upload
+        filename: String,
+        /// path to the desired upload file
         filepath: String,
     },
     /// show clipboard history
     History,
     /// list saved files
     Files,
+    /// download file specified by name
+    Download,
     /// start the daemon service
     Start,
     /// stop the daemon service
@@ -34,6 +43,8 @@ enum SlateCommand {
 }
 
 fn main() {
+    let db = Database::new().unwrap();
+
     let cli = SlateCLI::parse();
     println!("{:?}", cli);
 
@@ -45,7 +56,14 @@ fn main() {
         Paste => {send_command("paste");}
         History => {send_command("history");}
         Files => {send_command("files");}
-        Upload{ filepath } => {
+        Upload{ filename, filepath } => {
+            let pwd = std::env::current_dir().unwrap();
+            let path = PathBuf::from(filepath);
+
+            let final_path = pwd.join(path);
+            let filepath = final_path.to_string_lossy();
+
+            send_command(&format!("upload {} {}", filename, filepath));
         }
         _ => {}
     }

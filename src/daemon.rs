@@ -1,11 +1,14 @@
 use std::{
     fs,
     io::{BufRead,BufReader, Write},
-    os::unix::net::{UnixListener, UnixStream},
+    os::{fd::AsRawFd, unix::net::{UnixListener, UnixStream}},
     process::{exit, Command},
     thread,
 };
 use libc;
+use rusqlite::params;
+
+use crate::db::{self, Database};
 
 const SOCKET_PATH: &str = "/tmp/slate_daemon.sock";
 const PID_FILE: &str = "/tmp/slate_daemon.pid";
@@ -35,6 +38,21 @@ pub fn start_daemon() {
 }
 
 fn run_daemon() -> std::io::Result<()> {
+    // output prints to a log file, easy to debug
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/slate_daemon.log")?;
+
+    let stdout = log_file.try_clone()?;
+    let stderr = log_file.try_clone()?; unsafe {
+        libc::dup2(stdout.as_raw_fd(), libc::STDOUT_FILENO);
+        libc::dup2(stdout.as_raw_fd(), libc::STDERR_FILENO);
+    }
+
+    println!("started service");
+
+    // create PID file and a SOCKET file for daemon
     fs::write(PID_FILE, std::process::id().to_string())?;
 
     if fs::metadata(SOCKET_PATH).is_ok() {
@@ -61,15 +79,33 @@ fn handle_client(mut stream: UnixStream) {
     reader.read_line(&mut command).unwrap();
     let command = command.trim();
 
-    let response = match command {
-        cmd if cmd.starts_with("upload ") => {
-            let file_path = cmd.strip_prefix("upload").unwrap();
-            format!("uploading file at {}", file_path)
-        }
-        _ => format!("hey {}", command)
-    };
+    println!("got command {}", command);
 
-    writeln!(stream, "{}", response).unwrap();
+    if let Ok(db) = Database::new() {
+        let response = match command {
+            cmd if cmd.starts_with("upload ") => {
+                let args = cmd.strip_prefix("upload ").unwrap().to_string();
+                let (file_name, file_path) = args.split_once(" ").unwrap();
+                match db.upload_file(file_name, file_path) {
+                    Ok(_) => format!("uploading file {} from {}", file_name, file_path),
+                    Err(e) => format!("uploading file {} from {} got error {}", file_name, file_path, e)
+                }
+            }
+            "files" => {
+                let file_names = db.get_files().unwrap();
+                println!("read files {:?}", file_names);
+                match file_names.len() {
+                    0 => "NO FILES".to_string(),
+                    _ => format!("slate_files {}", file_names.join(" "))
+                }
+            }
+            _ => format!("hey {}", command)
+        };
+
+        writeln!(stream, "{}", response).unwrap();
+    } else {
+        writeln!(stream, "unable to open db").unwrap();
+    }
 }
 
 pub fn stop_daemon(){
@@ -87,12 +123,29 @@ pub fn stop_daemon(){
 pub fn send_command(command: &str) {
     match UnixStream::connect(SOCKET_PATH) {
         Ok(mut stream) => {
-            writeln!(stream, "{}", command).unwrap();
-
+            let write = writeln!(stream, "{}", command);
+            if write.is_err() {
+                eprintln!("failed to send msg");
+                return;
+            }
+            
             let mut response = String::new();
-            BufReader::new(stream).read_line(&mut response).unwrap();
-
-            println!("{}", response.trim());
+            let read = BufReader::new(stream).read_line(&mut response);
+            if read.is_err() {
+                eprintln!("failed to read response");
+                return;
+            }
+            match response {
+                r if r.starts_with("slate_files ") => {
+                    let response = r.strip_prefix("slate_files ").unwrap();
+                    let formatted_files = response
+                        .split(" ")
+                        .map(|s| s.to_string())
+                        .collect::<Vec<String>>();
+                    println!("response ({} files): {}", formatted_files.len(), formatted_files.join("\n"));
+                }
+                _ => println!("response: {}", response.trim())
+            }
         }
         Err(_) => {
             eprintln!("daemon is not running");
