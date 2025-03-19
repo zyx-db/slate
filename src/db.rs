@@ -1,6 +1,7 @@
 use rusqlite::{params, Connection};
 use std::{fs, io::Read};
 use zstd::stream::encode_all;
+use tokio::sync::mpsc::Receiver;
 
 const DATABASE_PATH: &str = "/tmp/slate_daemon.sqlite";
 
@@ -57,4 +58,11 @@ impl Database {
             Err(e) => return Err(e) 
         }
     }
+
+    pub async fn listen(self, mut rx: Receiver<DBMessage>) {
+        while let Some(_msg) = rx.recv().await {
+        }
+    }
 }
+
+pub struct DBMessage {}

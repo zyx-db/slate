@@ -6,6 +6,7 @@ use std::{
 
 use tokio::{net::{UnixListener, UnixStream}, task};
 use tokio::io::{BufReader, AsyncBufReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
 
 use libc;
 
@@ -53,6 +54,21 @@ async fn run_daemon() -> std::io::Result<()> {
     }
 
     println!("started service");
+
+    let (tx, rx) = mpsc::channel(100);
+
+    // db task
+    task::spawn(async move {
+        let db = Database::new().expect("unable to create db");
+        db.listen(rx).await;
+    });
+
+    // http task
+    let http_sender = tx.clone();
+    task::spawn(async move {
+        //let http_server = HTTPServer::new();
+        //http_server.listen(http_sender);
+    });
 
     // create PID file and a SOCKET file for daemon
     fs::write(PID_FILE, std::process::id().to_string())?;

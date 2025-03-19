@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+axum = "0.8.1"
 clap = { version = "4.5.32", features = ["derive"] }
 libc = "0.2.171"
 rusqlite = { version = "0.34.0", features = ["bundled"] }
-tokio = { version = "1.44.1", features = ["io-util", "net", "rt"] }
+tokio = { version = "1.44.1", features = ["io-util", "net", "rt", "sync"] }
 zstd = "0.13.3"
