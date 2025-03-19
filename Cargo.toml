@@ -7,4 +7,5 @@ edition = "2021"
 clap = { version = "4.5.32", features = ["derive"] }
 libc = "0.2.171"
 rusqlite = { version = "0.34.0", features = ["bundled"] }
+tokio = { version = "1.44.1", features = ["io-util", "net", "rt"] }
 zstd = "0.13.3"

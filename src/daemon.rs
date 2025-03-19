@@ -1,16 +1,17 @@
 use std::{
     fs,
-    io::{BufRead,BufReader, Write},
-    os::{fd::AsRawFd, unix::net::{UnixListener, UnixStream}},
-    process::{exit, Command},
-    thread,
+    os::fd::AsRawFd,
+    process::exit,
 };
+
+use tokio::{net::{UnixListener, UnixStream}, task};
+use tokio::io::{BufReader, AsyncBufReadExt, AsyncWriteExt};
+
 use libc;
-use rusqlite::params;
 
-use crate::db::{self, Database};
+use crate::db::Database;
 
-const SOCKET_PATH: &str = "/tmp/slate_daemon.sock";
+pub const SOCKET_PATH: &str = "/tmp/slate_daemon.sock";
 const PID_FILE: &str = "/tmp/slate_daemon.pid";
 
 pub fn start_daemon() {
@@ -26,18 +27,19 @@ pub fn start_daemon() {
             exit(1);
         }
         0 => {
-            if let Err(e) = run_daemon() {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            if let Err(e) = rt.block_on(run_daemon()) {
                 eprintln!("daemon error: {}", e);
                 exit(1);
             }
         }
         _ => {
-            println!("stale daemon started!")
+            println!("slate daemon started!")
         }
     }
 }
 
-fn run_daemon() -> std::io::Result<()> {
+async fn run_daemon() -> std::io::Result<()> {
     // output prints to a log file, easy to debug
     let log_file = fs::OpenOptions::new()
         .create(true)
@@ -47,7 +49,7 @@ fn run_daemon() -> std::io::Result<()> {
     let stdout = log_file.try_clone()?;
     let stderr = log_file.try_clone()?; unsafe {
         libc::dup2(stdout.as_raw_fd(), libc::STDOUT_FILENO);
-        libc::dup2(stdout.as_raw_fd(), libc::STDERR_FILENO);
+        libc::dup2(stderr.as_raw_fd(), libc::STDERR_FILENO);
     }
 
     println!("started service");
@@ -61,24 +63,28 @@ fn run_daemon() -> std::io::Result<()> {
 
     let listener = UnixListener::bind(SOCKET_PATH)?;
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                thread::spawn(move || handle_client(stream));
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                task::spawn(handle_client(stream));
             }
-            Err(e) => eprintln!("connection failed: {}", e)
+            Err(e) => {
+                eprintln!("connection failed: {}", e);
+            }
         }
     }
-
-    Ok(())
 }
 
-fn handle_client(mut stream: UnixStream) {
-    let mut reader = BufReader::new(&stream);
+async fn handle_client(mut stream: UnixStream){
+    let mut reader = BufReader::new(&mut stream);
     let mut command = String::new();
-    reader.read_line(&mut command).unwrap();
-    let command = command.trim();
 
+    if reader.read_line(&mut command).await.is_err() {
+        eprintln!("failed to read command");
+        return;
+    }
+
+    let command = command.trim();
     println!("got command {}", command);
 
     if let Ok(db) = Database::new() {
@@ -87,8 +93,8 @@ fn handle_client(mut stream: UnixStream) {
                 let args = cmd.strip_prefix("upload ").unwrap().to_string();
                 let (file_name, file_path) = args.split_once(" ").unwrap();
                 match db.upload_file(file_name, file_path) {
-                    Ok(_) => format!("uploading file {} from {}", file_name, file_path),
-                    Err(e) => format!("uploading file {} from {} got error {}", file_name, file_path, e)
+                    Ok(_) => format!("uploading file {} from {}\n", file_name, file_path),
+                    Err(e) => format!("uploading file {} from {} got error {}\n", file_name, file_path, e)
                 }
             }
             "files" => {
@@ -96,15 +102,17 @@ fn handle_client(mut stream: UnixStream) {
                 println!("read files {:?}", file_names);
                 match file_names.len() {
                     0 => "NO FILES".to_string(),
-                    _ => format!("slate_files {}", file_names.join(" "))
+                    _ => format!("slate_files {}\n", file_names.join(" "))
                 }
             }
-            _ => format!("hey {}", command)
+            _ => format!("hey {}\n", command)
         };
 
-        writeln!(stream, "{}", response).unwrap();
+        if let Err(e) = reader.get_mut().write_all(response.as_bytes()).await {
+            eprintln!("failed to send response: {}", e);
+        }
     } else {
-        writeln!(stream, "unable to open db").unwrap();
+        eprintln!("unable to open db");
     }
 }
 
@@ -117,38 +125,5 @@ pub fn stop_daemon(){
         println!("daemon stopped");
     } else {
         println!("daemon was not running");
-    }
-}
-
-pub fn send_command(command: &str) {
-    match UnixStream::connect(SOCKET_PATH) {
-        Ok(mut stream) => {
-            let write = writeln!(stream, "{}", command);
-            if write.is_err() {
-                eprintln!("failed to send msg");
-                return;
-            }
-            
-            let mut response = String::new();
-            let read = BufReader::new(stream).read_line(&mut response);
-            if read.is_err() {
-                eprintln!("failed to read response");
-                return;
-            }
-            match response {
-                r if r.starts_with("slate_files ") => {
-                    let response = r.strip_prefix("slate_files ").unwrap();
-                    let formatted_files = response
-                        .split(" ")
-                        .map(|s| s.to_string())
-                        .collect::<Vec<String>>();
-                    println!("response ({} files): {}", formatted_files.len(), formatted_files.join("\n"));
-                }
-                _ => println!("response: {}", response.trim())
-            }
-        }
-        Err(_) => {
-            eprintln!("daemon is not running");
-        }
     }
 }

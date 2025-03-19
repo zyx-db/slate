@@ -2,13 +2,14 @@ mod daemon;
 mod db;
 
 use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 
-use daemon::send_command;
 use daemon::start_daemon;
 use daemon::stop_daemon;
+use daemon::SOCKET_PATH;
 
 use clap::{Parser, Subcommand};
-use db::Database;
 
 #[derive(Parser, Debug)]
 #[command(name = "slate", about = "manage files and clipboards across devices")]
@@ -43,8 +44,6 @@ enum SlateCommand {
 }
 
 fn main() {
-    let db = Database::new().unwrap();
-
     let cli = SlateCLI::parse();
     println!("{:?}", cli);
 
@@ -66,5 +65,38 @@ fn main() {
             send_command(&format!("upload {} {}", filename, filepath));
         }
         _ => {}
+    }
+}
+
+fn send_command(command: &str) {
+    match UnixStream::connect(SOCKET_PATH) {
+        Ok(mut stream) => {
+            let write = writeln!(stream, "{}", command);
+            if write.is_err() {
+                eprintln!("failed to send msg");
+                return;
+            }
+            
+            let mut response = String::new();
+            let read = BufReader::new(stream).read_line(&mut response);
+            if read.is_err() {
+                eprintln!("failed to read response");
+                return;
+            }
+            match response {
+                r if r.starts_with("slate_files ") => {
+                    let response = r.strip_prefix("slate_files ").unwrap();
+                    let formatted_files = response
+                        .split(" ")
+                        .map(|s| s.to_string())
+                        .collect::<Vec<String>>();
+                    println!("response ({} files): {}", formatted_files.len(), formatted_files.join("\n"));
+                }
+                _ => println!("response: {}", response.trim())
+            }
+        }
+        Err(_) => {
+            eprintln!("daemon is not running");
+        }
     }
 }
