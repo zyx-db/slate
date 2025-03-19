@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 use std::{fs, io::Read};
 use zstd::stream::encode_all;
 
-const DATABASE_PATH: &str = "testing.sqlite";
+const DATABASE_PATH: &str = "/tmp/slate_daemon.sqlite";
 
 pub struct Database {
     connection: Connection,
