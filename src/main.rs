@@ -36,7 +36,12 @@ enum SlateCommand {
     /// list saved files
     Files,
     /// download file specified by name
-    Download,
+    Download {
+        /// name of the file to download
+        filename: String,
+        /// where you want the file downloaded
+        filepath: Option<String>,
+    },
     /// start the daemon service
     Start,
     /// stop the daemon service
@@ -76,7 +81,22 @@ fn main() {
 
             send_command(&format!("upload {} {}", filename, filepath));
         }
-        _ => {}
+        Download { filename, filepath } => {
+            let pwd = std::env::current_dir().unwrap();
+            let filepath = {
+                if let Some(filepath) = filepath {
+                    let path = PathBuf::from(filepath);
+                    pwd.join(path)
+                } else {
+                    pwd
+                }
+            };
+            send_command(&format!(
+                "download {} {}",
+                filename,
+                filepath.to_string_lossy()
+            ));
+        }
     }
 }
 

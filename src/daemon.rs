@@ -135,6 +135,30 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage>) {
                 }
             }
         }
+        cmd if cmd.starts_with("download ") => {
+            let args = cmd.strip_prefix("download ").unwrap().to_string();
+            let (file_name, file_path) = args.split_once(" ").unwrap();
+
+            let msg = DBMessage {
+                cmd: Command::Download {
+                    download_path: file_path.to_string(),
+                    file_name: file_name.to_string(),
+                },
+                sender: x,
+            };
+            if let Err(e) = tx.send(msg).await {
+                format!("unable to send msg to db {}", e)
+            } else {
+                let response = y.await.expect("failed to read response");
+                match response {
+                    Ok(_) => format!("downloading file {} at {}\n", file_name, file_path),
+                    Err(e) => format!(
+                        "downloading file {} at {} got error {}\n",
+                        file_name, file_path, e
+                    ),
+                }
+            }
+        }
         "files" => {
             let msg = DBMessage {
                 cmd: Command::ListFiles,
@@ -161,6 +185,9 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage>) {
                 }
             }
         }
+        //"copy" => {}
+        //"paste" => {}
+        //"history" => {}
         _ => format!("hey {}\n", command),
     };
 
