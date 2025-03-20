@@ -1,8 +1,8 @@
 use rusqlite::{params, Connection};
 use std::{fs, io::Read};
-use zstd::stream::encode_all;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot::Sender;
+use zstd::stream::encode_all;
 
 const DATABASE_PATH: &str = "/tmp/slate_daemon.sqlite";
 
@@ -23,7 +23,7 @@ impl Database {
         ";
 
         connection.execute_batch(sql)?;
-        
+
         Ok(Database { connection })
     }
 
@@ -31,13 +31,16 @@ impl Database {
         println!("opening file from {} with name {}", filepath, filename);
         let mut file = fs::File::open(filepath).expect("cannot open file");
         let mut file_data = Vec::new();
-        file.read_to_end(&mut file_data).expect("failed to read file");
+        file.read_to_end(&mut file_data)
+            .expect("failed to read file");
 
         let compressed_data = encode_all(&file_data[..], 3).unwrap();
-        self.connection.execute(
-            "INSERT INTO files (file_name, content) VALUES (?1, ?2)",
-            params![filename, compressed_data]
-        ).unwrap();
+        self.connection
+            .execute(
+                "INSERT INTO files (file_name, content) VALUES (?1, ?2)",
+                params![filename, compressed_data],
+            )
+            .unwrap();
 
         Ok(())
     }
@@ -48,15 +51,18 @@ impl Database {
         FROM files f;
         ";
 
-        let mut statement = self.connection.prepare(query).expect("unable to prepare query");
+        let mut statement = self
+            .connection
+            .prepare(query)
+            .expect("unable to prepare query");
 
-        let res: Result<Vec<String>, rusqlite::Error> = statement.
-            query_map([], |row| row.get::<usize, String>(0))?
+        let res: Result<Vec<String>, rusqlite::Error> = statement
+            .query_map([], |row| row.get::<usize, String>(0))?
             .collect();
 
         match res {
             Ok(res) => return Ok(res),
-            Err(e) => return Err(e) 
+            Err(e) => return Err(e),
         }
     }
 
@@ -65,11 +71,15 @@ impl Database {
             let tx = msg.sender;
             let cmd = msg.cmd;
             match cmd {
-                Command::Upload { file_name, file_path } => {
+                Command::Upload {
+                    file_name,
+                    file_path,
+                } => {
                     let result = self.upload_file(&file_name, &file_path);
                     match result {
                         Ok(()) => {
-                            tx.send(Ok(Response::UploadSuccessful)).expect("failed to send response");
+                            tx.send(Ok(Response::UploadSuccessful))
+                                .expect("failed to send response");
                         }
                         Err(e) => {
                             tx.send(Err(e)).expect("failed to send response");
@@ -80,10 +90,12 @@ impl Database {
                     let result = self.get_files();
                     match result {
                         Ok(x) => {
-                            tx.send(Ok(Response::Files {names: x})).expect("failed to send response");
+                            tx.send(Ok(Response::Files { names: x }))
+                                .expect("failed to send response");
                         }
                         Err(e) => {
-                            tx.send(Err(e.to_string())).expect("failed to send response");
+                            tx.send(Err(e.to_string()))
+                                .expect("failed to send response");
                         }
                     }
                 }
@@ -97,21 +109,19 @@ impl Database {
 pub enum Command {
     Upload {
         file_name: String,
-        file_path: String
+        file_path: String,
     },
     Download {
         download_path: String,
-        file_name: String
+        file_name: String,
     },
-    ListFiles
+    ListFiles,
 }
 
 #[derive(Debug)]
 pub enum Response {
     UploadSuccessful,
-    Files {
-        names: Vec<String>,
-    }
+    Files { names: Vec<String> },
 }
 
 #[derive(Debug)]

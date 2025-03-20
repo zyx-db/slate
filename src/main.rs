@@ -1,9 +1,9 @@
 mod daemon;
 mod db;
 
-use std::path::PathBuf;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 
 use daemon::start_daemon;
 use daemon::stop_daemon;
@@ -49,13 +49,25 @@ fn main() {
 
     use SlateCommand::*;
     match cli.command {
-        Start => {start_daemon();}
-        Stop => {stop_daemon();}
-        Copy => {send_command("copy");}
-        Paste => {send_command("paste");}
-        History => {send_command("history");}
-        Files => {send_command("files");}
-        Upload{ filename, filepath } => {
+        Start => {
+            start_daemon();
+        }
+        Stop => {
+            stop_daemon();
+        }
+        Copy => {
+            send_command("copy");
+        }
+        Paste => {
+            send_command("paste");
+        }
+        History => {
+            send_command("history");
+        }
+        Files => {
+            send_command("files");
+        }
+        Upload { filename, filepath } => {
             let pwd = std::env::current_dir().unwrap();
             let path = PathBuf::from(filepath);
 
@@ -76,7 +88,7 @@ fn send_command(command: &str) {
                 eprintln!("failed to send msg");
                 return;
             }
-            
+
             let mut response = String::new();
             let read = BufReader::new(stream).read_line(&mut response);
             if read.is_err() {
@@ -90,9 +102,13 @@ fn send_command(command: &str) {
                         .split(" ")
                         .map(|s| s.to_string())
                         .collect::<Vec<String>>();
-                    println!("response ({} files): {}", formatted_files.len(), formatted_files.join("\n"));
+                    println!(
+                        "response ({} files): {}",
+                        formatted_files.len(),
+                        formatted_files.join("\n")
+                    );
                 }
-                _ => println!("response: {}", response.trim())
+                _ => println!("response: {}", response.trim()),
             }
         }
         Err(_) => {

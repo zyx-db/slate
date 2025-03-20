@@ -1,13 +1,12 @@
-use std::{
-    fs,
-    os::fd::AsRawFd,
-    process::exit,
-};
+use std::{fs, os::fd::AsRawFd, process::exit};
 
-use tokio::{net::{UnixListener, UnixStream}, task};
-use tokio::io::{BufReader, AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::{
+    net::{UnixListener, UnixStream},
+    task,
+};
 
 use libc;
 
@@ -29,7 +28,10 @@ pub fn start_daemon() {
             exit(1);
         }
         0 => {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
             if let Err(e) = rt.block_on(run_daemon()) {
                 eprintln!("daemon error: {}", e);
                 exit(1);
@@ -49,7 +51,8 @@ async fn run_daemon() -> std::io::Result<()> {
         .open("/tmp/slate_daemon.log")?;
 
     let stdout = log_file.try_clone()?;
-    let stderr = log_file.try_clone()?; unsafe {
+    let stderr = log_file.try_clone()?;
+    unsafe {
         libc::dup2(stdout.as_raw_fd(), libc::STDOUT_FILENO);
         libc::dup2(stderr.as_raw_fd(), libc::STDERR_FILENO);
     }
@@ -93,7 +96,7 @@ async fn run_daemon() -> std::io::Result<()> {
     }
 }
 
-async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage>){
+async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage>) {
     let mut reader = BufReader::new(&mut stream);
     let mut command = String::new();
 
@@ -112,49 +115,53 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage>){
             let (file_name, file_path) = args.split_once(" ").unwrap();
 
             let msg = DBMessage {
-                cmd: Command::Upload { file_name: file_name.to_string(), file_path: file_path.to_string() },
+                cmd: Command::Upload {
+                    file_name: file_name.to_string(),
+                    file_path: file_path.to_string(),
+                },
                 sender: x,
             };
 
             if let Err(e) = tx.send(msg).await {
                 format!("unable to send msg to db {}", e)
-            }
-            else {
+            } else {
                 let response = y.await.expect("failed to read response");
                 match response {
                     Ok(_) => format!("uploading file {} from {}\n", file_name, file_path),
-                    Err(e) => format!("uploading file {} from {} got error {}\n", file_name, file_path, e)
+                    Err(e) => format!(
+                        "uploading file {} from {} got error {}\n",
+                        file_name, file_path, e
+                    ),
                 }
             }
-
         }
         "files" => {
             let msg = DBMessage {
                 cmd: Command::ListFiles,
-                sender: x
+                sender: x,
             };
 
             if let Err(e) = tx.send(msg).await {
                 format!("unable to send msg to db {}", e)
-            }
-            else {
+            } else {
                 let response = y.await.expect("failed to read response");
                 match response {
-                    Ok(Response::Files{ names }) => {
+                    Ok(Response::Files { names }) => {
                         if names.len() == 0 {
                             "NO FILES".to_string()
-                        }
-                        else {
+                        } else {
                             format!("slate_files {}\n", names.join(" "))
                         }
                     }
 
                     Err(e) => format!("listing files got error {}\n", e),
-                    _ => {format!("SHOULD NEVER PRINT?!\n")}
+                    _ => {
+                        format!("SHOULD NEVER PRINT?!\n")
+                    }
                 }
             }
         }
-        _ => format!("hey {}\n", command)
+        _ => format!("hey {}\n", command),
     };
 
     if let Err(e) = reader.get_mut().write_all(response.as_bytes()).await {
@@ -162,7 +169,7 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage>){
     }
 }
 
-pub fn stop_daemon(){
+pub fn stop_daemon() {
     if let Ok(pid) = fs::read_to_string(PID_FILE) {
         let pid: i32 = pid.trim().parse().unwrap();
         unsafe { libc::kill(pid, libc::SIGTERM) };
