@@ -9,6 +9,7 @@ use tokio::{
 };
 
 use libc;
+use arboard;
 
 use crate::db::{Command, DBMessage, Database, Response};
 
@@ -96,7 +97,7 @@ async fn run_daemon() -> std::io::Result<()> {
     }
 }
 
-async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage>) {
+async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage<'_>>) {
     let mut reader = BufReader::new(&mut stream);
     let mut command = String::new();
 
@@ -185,7 +186,42 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage>) {
                 }
             }
         }
-        //"copy" => {}
+        "copy" => {
+            let mut clipboard = arboard::Clipboard::new().expect("unable to open clipboard");
+            let msg = {
+                if let Ok(text) = clipboard.get_text() {
+                    Some(DBMessage {
+                        cmd: Command::CopyText { text },
+                        sender: x
+                    })
+                } else if let Ok(image) = clipboard.get_image() {
+                    Some(DBMessage {
+                        cmd: Command::CopyImage { image },
+                        sender: x
+                    })
+                } else {
+                    eprintln!("failed to get text: {}", clipboard.get_text().unwrap_err());
+                    None
+                }
+            };
+
+            if msg.is_none() {
+                format!("failed to copy")
+            }
+            else if let Err(e) = tx.send(msg.unwrap()).await {
+                format!("unable to send message to db {}", e)
+            } else {
+                let response = y.await.expect("failed to read response");
+                match response {
+                    Ok(_) => {
+                        format!("successfully copied to db")
+                    }
+                    Err(e) => {
+                        format!("error copying to db: {}", e)
+                    }
+                }
+            }
+        }
         //"paste" => {}
         //"history" => {}
         _ => format!("hey {}\n", command),
