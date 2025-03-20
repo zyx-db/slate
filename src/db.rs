@@ -2,6 +2,7 @@ use rusqlite::{params, Connection};
 use std::{fs, io::Read};
 use zstd::stream::encode_all;
 use tokio::sync::mpsc::Receiver;
+use tokio::sync::oneshot::Sender;
 
 const DATABASE_PATH: &str = "/tmp/slate_daemon.sqlite";
 
@@ -60,9 +61,61 @@ impl Database {
     }
 
     pub async fn listen(self, mut rx: Receiver<DBMessage>) {
-        while let Some(_msg) = rx.recv().await {
+        while let Some(msg) = rx.recv().await {
+            let tx = msg.sender;
+            let cmd = msg.cmd;
+            match cmd {
+                Command::Upload { file_name, file_path } => {
+                    let result = self.upload_file(&file_name, &file_path);
+                    match result {
+                        Ok(()) => {
+                            tx.send(Ok(Response::UploadSuccessful)).expect("failed to send response");
+                        }
+                        Err(e) => {
+                            tx.send(Err(e)).expect("failed to send response");
+                        }
+                    }
+                }
+                Command::ListFiles => {
+                    let result = self.get_files();
+                    match result {
+                        Ok(x) => {
+                            tx.send(Ok(Response::Files {names: x})).expect("failed to send response");
+                        }
+                        Err(e) => {
+                            tx.send(Err(e.to_string())).expect("failed to send response");
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
 }
 
-pub struct DBMessage {}
+#[derive(Debug)]
+pub enum Command {
+    Upload {
+        file_name: String,
+        file_path: String
+    },
+    Download {
+        download_path: String,
+        file_name: String
+    },
+    ListFiles
+}
+
+#[derive(Debug)]
+pub enum Response {
+    UploadSuccessful,
+    Files {
+        names: Vec<String>,
+    }
+}
+
+#[derive(Debug)]
+pub struct DBMessage {
+    pub cmd: Command,
+    pub sender: Sender<Result<Response, String>>,
+}

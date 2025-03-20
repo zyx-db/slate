@@ -7,10 +7,11 @@ use std::{
 use tokio::{net::{UnixListener, UnixStream}, task};
 use tokio::io::{BufReader, AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 use libc;
 
-use crate::db::Database;
+use crate::db::{Command, DBMessage, Database, Response};
 
 pub const SOCKET_PATH: &str = "/tmp/slate_daemon.sock";
 const PID_FILE: &str = "/tmp/slate_daemon.pid";
@@ -82,7 +83,8 @@ async fn run_daemon() -> std::io::Result<()> {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                task::spawn(handle_client(stream));
+                let tx = tx.clone();
+                task::spawn(handle_client(stream, tx));
             }
             Err(e) => {
                 eprintln!("connection failed: {}", e);
@@ -91,7 +93,7 @@ async fn run_daemon() -> std::io::Result<()> {
     }
 }
 
-async fn handle_client(mut stream: UnixStream){
+async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage>){
     let mut reader = BufReader::new(&mut stream);
     let mut command = String::new();
 
@@ -103,32 +105,60 @@ async fn handle_client(mut stream: UnixStream){
     let command = command.trim();
     println!("got command {}", command);
 
-    if let Ok(db) = Database::new() {
-        let response = match command {
-            cmd if cmd.starts_with("upload ") => {
-                let args = cmd.strip_prefix("upload ").unwrap().to_string();
-                let (file_name, file_path) = args.split_once(" ").unwrap();
-                match db.upload_file(file_name, file_path) {
+    let (x, y) = oneshot::channel();
+    let response = match command {
+        cmd if cmd.starts_with("upload ") => {
+            let args = cmd.strip_prefix("upload ").unwrap().to_string();
+            let (file_name, file_path) = args.split_once(" ").unwrap();
+
+            let msg = DBMessage {
+                cmd: Command::Upload { file_name: file_name.to_string(), file_path: file_path.to_string() },
+                sender: x,
+            };
+
+            if let Err(e) = tx.send(msg).await {
+                format!("unable to send msg to db {}", e)
+            }
+            else {
+                let response = y.await.expect("failed to read response");
+                match response {
                     Ok(_) => format!("uploading file {} from {}\n", file_name, file_path),
                     Err(e) => format!("uploading file {} from {} got error {}\n", file_name, file_path, e)
                 }
             }
-            "files" => {
-                let file_names = db.get_files().unwrap();
-                println!("read files {:?}", file_names);
-                match file_names.len() {
-                    0 => "NO FILES".to_string(),
-                    _ => format!("slate_files {}\n", file_names.join(" "))
+
+        }
+        "files" => {
+            let msg = DBMessage {
+                cmd: Command::ListFiles,
+                sender: x
+            };
+
+            if let Err(e) = tx.send(msg).await {
+                format!("unable to send msg to db {}", e)
+            }
+            else {
+                let response = y.await.expect("failed to read response");
+                match response {
+                    Ok(Response::Files{ names }) => {
+                        if names.len() == 0 {
+                            "NO FILES".to_string()
+                        }
+                        else {
+                            format!("slate_files {}\n", names.join(" "))
+                        }
+                    }
+
+                    Err(e) => format!("listing files got error {}\n", e),
+                    _ => {format!("SHOULD NEVER PRINT?!\n")}
                 }
             }
-            _ => format!("hey {}\n", command)
-        };
-
-        if let Err(e) = reader.get_mut().write_all(response.as_bytes()).await {
-            eprintln!("failed to send response: {}", e);
         }
-    } else {
-        eprintln!("unable to open db");
+        _ => format!("hey {}\n", command)
+    };
+
+    if let Err(e) = reader.get_mut().write_all(response.as_bytes()).await {
+        eprintln!("failed to send response: {}", e);
     }
 }
 
