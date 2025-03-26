@@ -23,7 +23,9 @@ enum SlateCommand {
     /// copy data to the clipboard manager
     Copy,
     /// paste data from the clipboard manager
-    Paste,
+    Paste {
+        offset: Option<usize>
+    },
     /// upload a file
     Upload {
         /// file name for the upload
@@ -46,6 +48,8 @@ enum SlateCommand {
     Start,
     /// stop the daemon service
     Stop,
+    /// restart the daemon service
+    Restart,
 }
 
 fn main() {
@@ -55,16 +59,35 @@ fn main() {
     use SlateCommand::*;
     match cli.command {
         Start => {
-            start_daemon();
+            match start_daemon() {
+                Err(e) => { eprintln!("{}", e)}
+                Ok(_) => { println!("daemon started!")}
+            };
         }
         Stop => {
-            stop_daemon();
+            match stop_daemon() {
+                Ok(_) => println!("daemon stopped"),
+                Err(_) => println!("daemon was not running"),
+            };
+        }
+        Restart => {
+            let _ = stop_daemon();
+            match start_daemon() {
+                Ok(_) => println!("daemon restarted"),
+                Err(_) => println!("unable to restart daemon")
+            };
         }
         Copy => {
             send_command("copy");
         }
-        Paste => {
-            send_command("paste");
+        Paste { offset } => {
+            let offset = {
+                match offset {
+                    Some(x) => x,
+                    None => 0
+                }
+            };
+            send_command(&format!("paste {}", offset));
         }
         History => {
             send_command("history");

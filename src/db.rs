@@ -1,5 +1,6 @@
 use arboard::ImageData;
 use rusqlite::{params, Connection};
+use std::fmt::Debug;
 use std::{fs, io::Read};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot::Sender;
@@ -9,6 +10,11 @@ const DATABASE_PATH: &str = "/tmp/slate_daemon.sqlite";
 
 pub struct Database {
     connection: Connection,
+}
+
+enum ClipboardEntry <'a> {
+    Image(ImageData<'a>),
+    Text(String) 
 }
 
 impl Database {
@@ -21,15 +27,12 @@ impl Database {
                 file_name TEXT UNIQUE NOT NULL,
                 content BLOB NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS images (
+            CREATE TABLE IF NOT EXISTS clipboard (
                 key INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-                width INTEGER NOT NULL,
-                height INTEGER NOT NULL,
-                content BLOB NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS clipboard_text (
-                key INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-                content TEXT NOT NULL
+                text_data TEXT,
+                width INTEGER,
+                height INTEGER,
+                image_content BLOB 
             );
         ";
 
@@ -79,7 +82,7 @@ impl Database {
 
     fn save_text(&self, text: String) -> Result<usize, rusqlite::Error>{
         let query = "
-            INSERT INTO clipboard_text (content) VALUES (?1)
+            INSERT INTO clipboard (text_data) VALUES (?1)
         ";
         let mut statement = self
             .connection
@@ -91,7 +94,7 @@ impl Database {
 
     fn save_image(&self, image: ImageData) -> Result<usize, rusqlite::Error>{
         let query = "
-            INSERT INTO images (width, height, content) VALUES (?1, ?2, ?3)
+            INSERT INTO clipboard (width, height, image_content) VALUES (?1, ?2, ?3)
         ";
         let mut statement = self
             .connection
@@ -101,12 +104,46 @@ impl Database {
         statement.execute(params![image.width, image.height, image.bytes])
     }
 
+    fn read_clipboard(&self, offset: usize) -> Result<ClipboardEntry, rusqlite::Error> {
+        let query = "
+            SELECT c.text_data, c.width, c.height, c.image_content
+            FROM clipboard c
+            ORDER BY key DESC
+            LIMIT 1 OFFSET ?;
+        ";
+
+        let mut statement = self
+            .connection
+            .prepare(query)
+            .expect("unable to prepare query");
+
+        statement.query_row(params![offset], |row| {
+            let text: Option<String> = row.get::<usize, Option<String>>(0)?;
+            let width: Option<usize> = row.get::<usize, Option<usize>>(1)?;
+            let height: Option<usize> = row.get::<usize, Option<usize>>(2)?;
+            let content: Option<Vec<u8>> = row.get::<usize, Option<Vec<u8>>>(3)?;
+
+            println!("{:?} {:?} {:?} {:?}", text, width, height, &content);
+            if let Some(t) = text {
+                return Ok(ClipboardEntry::Text(t));
+            } else if let (Some(w), Some(h), Some(img)) = (width, height, &content) {
+                return Ok(ClipboardEntry::Image(
+                    ImageData { width: w, height: h, bytes: std::borrow::Cow::Owned(img.clone()) }
+                ));
+            } else {
+                Err(rusqlite::Error::QueryReturnedNoRows)
+            }
+        })
+    }
+
     pub async fn listen(self, mut rx: Receiver<DBMessage<'_>>) {
+        println!("db started!");
         while let Some(msg) = rx.recv().await {
             let tx = msg.sender;
             let cmd = msg.cmd;
+            use Command::*;
             match cmd {
-                Command::Upload {
+                Upload {
                     file_name,
                     file_path,
                 } => {
@@ -121,7 +158,7 @@ impl Database {
                         }
                     }
                 }
-                Command::ListFiles => {
+                ListFiles => {
                     let result = self.get_files();
                     match result {
                         Ok(x) => {
@@ -134,7 +171,7 @@ impl Database {
                         }
                     }
                 }
-                Command::CopyImage {
+                CopyImage {
                     image
                 } => {
                     let result = self.save_image(image);
@@ -149,7 +186,7 @@ impl Database {
                         }
                     }
                 }
-                Command::CopyText {
+                CopyText {
                     text
                 } => {
                     let result = self.save_text(text);
@@ -164,9 +201,50 @@ impl Database {
                         }
                     }
                 }
+                Paste { offset, mut clipboard } => {
+                    let result = self.read_clipboard(offset);
+                    let mut completed = true;
+                    if result.is_ok() {
+                        let r = result.unwrap();
+                        use ClipboardEntry::*;
+                        match r {
+                            Image( i ) => {
+                                if (clipboard.inner.set_image(i)).is_err() {
+                                    println!("failed to set image");
+                                    completed = false;
+                                }
+                            }
+                            Text( t ) => {
+                                if (clipboard.inner.set_text(t)).is_err() {
+                                    println!("failed to set text");
+                                    completed = false;
+                                }
+                            }
+                        };
+                    } else {
+                        println!("failed to read db");
+                        completed = false;
+                    }
+
+                    if completed {
+                        tx.send(Ok(Response::PasteSuccessful)).expect("failed to send response");
+                    } else {
+                        tx.send(Err("failed to paste".to_string())).expect("failed to send response");
+                    }
+                }
                 _ => {}
             }
         }
+    }
+}
+
+pub struct ClipboardWrapper {
+    pub inner: arboard::Clipboard
+}
+
+impl Debug for ClipboardWrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Clipboard")
     }
 }
 
@@ -186,6 +264,10 @@ pub enum Command<'a> {
     CopyText {
         text: String
     },
+    Paste {
+        offset: usize,
+        clipboard: ClipboardWrapper
+    },
     ListFiles,
 }
 
@@ -193,6 +275,7 @@ pub enum Command<'a> {
 pub enum Response {
     UploadSuccessful,
     CopySuccessful,
+    PasteSuccessful,
     Files { names: Vec<String> },
 }
 

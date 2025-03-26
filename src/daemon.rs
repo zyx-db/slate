@@ -11,12 +11,12 @@ use tokio::{
 use libc;
 use arboard;
 
-use crate::db::{Command, DBMessage, Database, Response};
+use crate::db::{Command, DBMessage, Database, Response, ClipboardWrapper};
 
 pub const SOCKET_PATH: &str = "/tmp/slate_daemon.sock";
 const PID_FILE: &str = "/tmp/slate_daemon.pid";
 
-pub fn start_daemon() {
+pub fn start_daemon() -> Result<(), String> {
     if let Ok(_) = fs::metadata(PID_FILE) {
         eprintln!("slate daemon is already running!");
         exit(1);
@@ -25,8 +25,7 @@ pub fn start_daemon() {
     // fork proc
     match unsafe { libc::fork() } {
         -1 => {
-            eprintln!("failed to fork process to start daemon");
-            exit(1);
+            Err(format!("failed to fork process to start daemon"))
         }
         0 => {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -34,12 +33,13 @@ pub fn start_daemon() {
                 .build()
                 .unwrap();
             if let Err(e) = rt.block_on(run_daemon()) {
-                eprintln!("daemon error: {}", e);
-                exit(1);
+                Err(format!("daemon error: {}", e))
+            } else {
+                Ok(())
             }
         }
         _ => {
-            println!("slate daemon started!")
+            Ok(())
         }
     }
 }
@@ -222,7 +222,26 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage<'_>>) 
                 }
             }
         }
-        //"paste" => {}
+        cmd if cmd.starts_with("paste ") => {
+            let cmd = command.strip_prefix("paste ").unwrap();
+            let offset = cmd.parse::<usize>().unwrap();
+            let clipboard = arboard::Clipboard::new().expect("unable to open clipboard");
+            let msg = DBMessage {cmd: Command::Paste{ offset, clipboard: ClipboardWrapper { inner: clipboard } }, sender: x};
+
+            if let Err(e) = tx.send(msg).await {
+                format!("unable to send message to db {}", e)
+            } else {
+                let response = y.await.expect("failed to read response");
+                match response {
+                    Ok(_) => {
+                        format!("successfully pasted to clipboard")
+                    }
+                    Err(e) => {
+                        format!("error pasting to clipboard: {}", e)
+                    }
+                }
+            }
+        }
         //"history" => {}
         _ => format!("hey {}\n", command),
     };
@@ -232,14 +251,14 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage<'_>>) 
     }
 }
 
-pub fn stop_daemon() {
+pub fn stop_daemon() -> Result<(), ()> {
     if let Ok(pid) = fs::read_to_string(PID_FILE) {
         let pid: i32 = pid.trim().parse().unwrap();
         unsafe { libc::kill(pid, libc::SIGTERM) };
         fs::remove_file(PID_FILE).unwrap();
         fs::remove_file(SOCKET_PATH).unwrap();
-        println!("daemon stopped");
+        Ok(())
     } else {
-        println!("daemon was not running");
+        Err(())
     }
 }
