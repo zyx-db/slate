@@ -8,8 +8,8 @@ WIP
 
 ## WIP features
 
-- actual clipboard saving (arboard)
+- actual clipboard saving (arboard) (DONE)
 - daemon listening on ports
 - cross device sync
 - "service discovery" (will likely just use TailScale API + tags)
-- file compression with zstd
+- file compression with zstd (DONE)
