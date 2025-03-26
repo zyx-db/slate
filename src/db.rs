@@ -12,9 +12,9 @@ pub struct Database {
     connection: Connection,
 }
 
-enum ClipboardEntry <'a> {
+enum ClipboardEntry<'a> {
     Image(ImageData<'a>),
-    Text(String) 
+    Text(String),
 }
 
 impl Database {
@@ -80,7 +80,30 @@ impl Database {
         }
     }
 
-    fn save_text(&self, text: String) -> Result<usize, rusqlite::Error>{
+    fn get_history(&self) -> Result<Vec<String>, rusqlite::Error> {
+        let query = "
+            SELECT c.text_data
+            FROM clipboard c
+            ORDER BY key DESC
+            LIMIT 20;
+        ";
+
+        let mut statement = self
+            .connection
+            .prepare(query)
+            .expect("failed to prepare query");
+
+        let result = statement
+            .query_map(params![], |row| {
+                let name: Option<String> = row.get::<usize, Option<String>>(0)?;
+                Ok(name.unwrap_or_else(|| "image".to_string()))
+            })?
+            .collect::<Result<Vec<String>, rusqlite::Error>>();
+
+        result
+    }
+
+    fn save_text(&self, text: String) -> Result<usize, rusqlite::Error> {
         let query = "
             INSERT INTO clipboard (text_data) VALUES (?1)
         ";
@@ -92,7 +115,7 @@ impl Database {
         statement.execute(params![text])
     }
 
-    fn save_image(&self, image: ImageData) -> Result<usize, rusqlite::Error>{
+    fn save_image(&self, image: ImageData) -> Result<usize, rusqlite::Error> {
         let query = "
             INSERT INTO clipboard (width, height, image_content) VALUES (?1, ?2, ?3)
         ";
@@ -127,9 +150,11 @@ impl Database {
             if let Some(t) = text {
                 return Ok(ClipboardEntry::Text(t));
             } else if let (Some(w), Some(h), Some(img)) = (width, height, &content) {
-                return Ok(ClipboardEntry::Image(
-                    ImageData { width: w, height: h, bytes: std::borrow::Cow::Owned(img.clone()) }
-                ));
+                return Ok(ClipboardEntry::Image(ImageData {
+                    width: w,
+                    height: h,
+                    bytes: std::borrow::Cow::Owned(img.clone()),
+                }));
             } else {
                 Err(rusqlite::Error::QueryReturnedNoRows)
             }
@@ -171,9 +196,7 @@ impl Database {
                         }
                     }
                 }
-                CopyImage {
-                    image
-                } => {
+                CopyImage { image } => {
                     let result = self.save_image(image);
                     match result {
                         Ok(_) => {
@@ -186,9 +209,7 @@ impl Database {
                         }
                     }
                 }
-                CopyText {
-                    text
-                } => {
+                CopyText { text } => {
                     let result = self.save_text(text);
                     match result {
                         Ok(_) => {
@@ -201,20 +222,23 @@ impl Database {
                         }
                     }
                 }
-                Paste { offset, mut clipboard } => {
+                Paste {
+                    offset,
+                    mut clipboard,
+                } => {
                     let result = self.read_clipboard(offset);
                     let mut completed = true;
                     if result.is_ok() {
                         let r = result.unwrap();
                         use ClipboardEntry::*;
                         match r {
-                            Image( i ) => {
+                            Image(i) => {
                                 if (clipboard.inner.set_image(i)).is_err() {
                                     println!("failed to set image");
                                     completed = false;
                                 }
                             }
-                            Text( t ) => {
+                            Text(t) => {
                                 if (clipboard.inner.set_text(t)).is_err() {
                                     println!("failed to set text");
                                     completed = false;
@@ -227,11 +251,23 @@ impl Database {
                     }
 
                     if completed {
-                        tx.send(Ok(Response::PasteSuccessful)).expect("failed to send response");
+                        tx.send(Ok(Response::PasteSuccessful))
+                            .expect("failed to send response");
                     } else {
-                        tx.send(Err("failed to paste".to_string())).expect("failed to send response");
+                        tx.send(Err("failed to paste".to_string()))
+                            .expect("failed to send response");
                     }
                 }
+                History => match self.get_history() {
+                    Ok(x) => {
+                        tx.send(Ok(Response::History { names: x }))
+                            .expect("failed to send response");
+                    }
+                    Err(e) => {
+                        tx.send(Err(e.to_string()))
+                            .expect("failed to send response");
+                    }
+                },
                 _ => {}
             }
         }
@@ -239,7 +275,7 @@ impl Database {
 }
 
 pub struct ClipboardWrapper {
-    pub inner: arboard::Clipboard
+    pub inner: arboard::Clipboard,
 }
 
 impl Debug for ClipboardWrapper {
@@ -259,16 +295,17 @@ pub enum Command<'a> {
         file_name: String,
     },
     CopyImage {
-        image: ImageData<'a>
+        image: ImageData<'a>,
     },
     CopyText {
-        text: String
+        text: String,
     },
     Paste {
         offset: usize,
-        clipboard: ClipboardWrapper
+        clipboard: ClipboardWrapper,
     },
     ListFiles,
+    History,
 }
 
 #[derive(Debug)]
@@ -277,6 +314,7 @@ pub enum Response {
     CopySuccessful,
     PasteSuccessful,
     Files { names: Vec<String> },
+    History { names: Vec<String> },
 }
 
 #[derive(Debug)]

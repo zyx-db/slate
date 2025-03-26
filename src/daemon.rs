@@ -8,10 +8,10 @@ use tokio::{
     task,
 };
 
-use libc;
 use arboard;
+use libc;
 
-use crate::db::{Command, DBMessage, Database, Response, ClipboardWrapper};
+use crate::db::{ClipboardWrapper, Command, DBMessage, Database, Response};
 
 pub const SOCKET_PATH: &str = "/tmp/slate_daemon.sock";
 const PID_FILE: &str = "/tmp/slate_daemon.pid";
@@ -24,9 +24,7 @@ pub fn start_daemon() -> Result<(), String> {
 
     // fork proc
     match unsafe { libc::fork() } {
-        -1 => {
-            Err(format!("failed to fork process to start daemon"))
-        }
+        -1 => Err(format!("failed to fork process to start daemon")),
         0 => {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -38,9 +36,7 @@ pub fn start_daemon() -> Result<(), String> {
                 Ok(())
             }
         }
-        _ => {
-            Ok(())
-        }
+        _ => Ok(()),
     }
 }
 
@@ -192,12 +188,12 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage<'_>>) 
                 if let Ok(text) = clipboard.get_text() {
                     Some(DBMessage {
                         cmd: Command::CopyText { text },
-                        sender: x
+                        sender: x,
                     })
                 } else if let Ok(image) = clipboard.get_image() {
                     Some(DBMessage {
                         cmd: Command::CopyImage { image },
-                        sender: x
+                        sender: x,
                     })
                 } else {
                     eprintln!("failed to get text: {}", clipboard.get_text().unwrap_err());
@@ -207,8 +203,7 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage<'_>>) 
 
             if msg.is_none() {
                 format!("failed to copy")
-            }
-            else if let Err(e) = tx.send(msg.unwrap()).await {
+            } else if let Err(e) = tx.send(msg.unwrap()).await {
                 format!("unable to send message to db {}", e)
             } else {
                 let response = y.await.expect("failed to read response");
@@ -226,7 +221,13 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage<'_>>) 
             let cmd = command.strip_prefix("paste ").unwrap();
             let offset = cmd.parse::<usize>().unwrap();
             let clipboard = arboard::Clipboard::new().expect("unable to open clipboard");
-            let msg = DBMessage {cmd: Command::Paste{ offset, clipboard: ClipboardWrapper { inner: clipboard } }, sender: x};
+            let msg = DBMessage {
+                cmd: Command::Paste {
+                    offset,
+                    clipboard: ClipboardWrapper { inner: clipboard },
+                },
+                sender: x,
+            };
 
             if let Err(e) = tx.send(msg).await {
                 format!("unable to send message to db {}", e)
@@ -242,7 +243,28 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage<'_>>) 
                 }
             }
         }
-        //"history" => {}
+        "history" => {
+            if tx
+                .send(DBMessage {
+                    cmd: Command::History,
+                    sender: x,
+                })
+                .await
+                .is_err()
+            {
+                format!("failed to send message to db")
+            } else {
+                match y.await.expect("failed to read response") {
+                    Ok(Response::History { names }) => {
+                        format!("history {}", names.join(" "))
+                    }
+                    Err(e) => format!("error getting history {}", e),
+                    _ => {
+                        format!("SHOULD NEVER PRINT?!\n")
+                    }
+                }
+            }
+        }
         _ => format!("hey {}\n", command),
     };
 
