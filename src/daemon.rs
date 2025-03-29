@@ -65,6 +65,12 @@ async fn run_daemon() -> std::io::Result<()> {
         db.listen(rx).await;
     });
 
+    // control plane task
+    //task::spawn(async move {
+    //    let node = Node::new();
+    //    node.listen(control_rx);
+    //});
+
     // http task
     let http_sender = tx.clone();
     task::spawn(async move {
