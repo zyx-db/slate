@@ -12,6 +12,7 @@ use arboard;
 use libc;
 
 use crate::db::{ClipboardWrapper, Command, DBMessage, Database, Response};
+use crate::http_server::run_http_server;
 
 pub const SOCKET_PATH: &str = "/tmp/slate_daemon.sock";
 const PID_FILE: &str = "/tmp/slate_daemon.pid";
@@ -67,8 +68,7 @@ async fn run_daemon() -> std::io::Result<()> {
     // http task
     let http_sender = tx.clone();
     task::spawn(async move {
-        //let http_server = HTTPServer::new();
-        //http_server.listen(http_sender);
+        run_http_server().await;
     });
 
     // create PID file and a SOCKET file for daemon
