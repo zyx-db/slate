@@ -166,7 +166,7 @@ impl Database {
         while let Some(msg) = rx.recv().await {
             let tx = msg.sender;
             let cmd = msg.cmd;
-            use Command::*;
+            use DBCommand::*;
             match cmd {
                 Upload {
                     file_name,
@@ -285,7 +285,7 @@ impl Debug for ClipboardWrapper {
 }
 
 #[derive(Debug)]
-pub enum Command<'a> {
+pub enum DBCommand<'a> {
     Upload {
         file_name: String,
         file_path: String,
@@ -319,6 +319,6 @@ pub enum Response {
 
 #[derive(Debug)]
 pub struct DBMessage<'a> {
-    pub cmd: Command<'a>,
+    pub cmd: DBCommand<'a>,
     pub sender: Sender<Result<Response, String>>,
 }

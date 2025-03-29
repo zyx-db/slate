@@ -11,7 +11,8 @@ use tokio::{
 use arboard;
 use libc;
 
-use crate::db::{ClipboardWrapper, Command, DBMessage, Database, Response};
+use crate::control_plane::{trigger_anti_entropy, ControlMessage, Node};
+use crate::db::{ClipboardWrapper, DBCommand, DBMessage, Database, Response};
 use crate::http_server::run_http_server;
 
 pub const SOCKET_PATH: &str = "/tmp/slate_daemon.sock";
@@ -57,22 +58,28 @@ async fn run_daemon() -> std::io::Result<()> {
 
     println!("started service");
 
-    let (tx, rx) = mpsc::channel(100);
-
     // db task
+    let (database_tx, rx) = mpsc::channel(100);
     task::spawn(async move {
         let db = Database::new().expect("unable to create db");
         db.listen(rx).await;
     });
 
     // control plane task
-    //task::spawn(async move {
-    //    let node = Node::new();
-    //    node.listen(control_rx);
-    //});
+    let (control_tx, rx) = mpsc::channel(100);
+    let db_tx = database_tx.clone();
+    task::spawn(async move {
+        let node = Node::new();
+        node.listen(rx, db_tx).await;
+    });
+
+    // anti entropy trigger
+    let tx = control_tx.clone();
+    task::spawn(async move {
+        trigger_anti_entropy(tx).await;
+    });
 
     // http task
-    let http_sender = tx.clone();
     task::spawn(async move {
         run_http_server().await;
     });
@@ -89,8 +96,9 @@ async fn run_daemon() -> std::io::Result<()> {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                let tx = tx.clone();
-                task::spawn(handle_client(stream, tx));
+                let db_tx = database_tx.clone();
+                let cp_tx = control_tx.clone();
+                task::spawn(handle_client(stream, db_tx, cp_tx));
             }
             Err(e) => {
                 eprintln!("connection failed: {}", e);
@@ -99,7 +107,11 @@ async fn run_daemon() -> std::io::Result<()> {
     }
 }
 
-async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage<'_>>) {
+async fn handle_client(
+    mut stream: UnixStream,
+    tx: mpsc::Sender<DBMessage<'_>>,
+    cp_tx: mpsc::Sender<ControlMessage>,
+) {
     let mut reader = BufReader::new(&mut stream);
     let mut command = String::new();
 
@@ -118,7 +130,7 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage<'_>>) 
             let (file_name, file_path) = args.split_once(" ").unwrap();
 
             let msg = DBMessage {
-                cmd: Command::Upload {
+                cmd: DBCommand::Upload {
                     file_name: file_name.to_string(),
                     file_path: file_path.to_string(),
                 },
@@ -143,7 +155,7 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage<'_>>) 
             let (file_name, file_path) = args.split_once(" ").unwrap();
 
             let msg = DBMessage {
-                cmd: Command::Download {
+                cmd: DBCommand::Download {
                     download_path: file_path.to_string(),
                     file_name: file_name.to_string(),
                 },
@@ -164,7 +176,7 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage<'_>>) 
         }
         "files" => {
             let msg = DBMessage {
-                cmd: Command::ListFiles,
+                cmd: DBCommand::ListFiles,
                 sender: x,
             };
 
@@ -193,12 +205,12 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage<'_>>) 
             let msg = {
                 if let Ok(text) = clipboard.get_text() {
                     Some(DBMessage {
-                        cmd: Command::CopyText { text },
+                        cmd: DBCommand::CopyText { text },
                         sender: x,
                     })
                 } else if let Ok(image) = clipboard.get_image() {
                     Some(DBMessage {
-                        cmd: Command::CopyImage { image },
+                        cmd: DBCommand::CopyImage { image },
                         sender: x,
                     })
                 } else {
@@ -228,7 +240,7 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage<'_>>) 
             let offset = cmd.parse::<usize>().unwrap();
             let clipboard = arboard::Clipboard::new().expect("unable to open clipboard");
             let msg = DBMessage {
-                cmd: Command::Paste {
+                cmd: DBCommand::Paste {
                     offset,
                     clipboard: ClipboardWrapper { inner: clipboard },
                 },
@@ -252,7 +264,7 @@ async fn handle_client(mut stream: UnixStream, tx: mpsc::Sender<DBMessage<'_>>) 
         "history" => {
             if tx
                 .send(DBMessage {
-                    cmd: Command::History,
+                    cmd: DBCommand::History,
                     sender: x,
                 })
                 .await

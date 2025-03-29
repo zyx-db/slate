@@ -1,3 +1,4 @@
+mod control_plane;
 mod daemon;
 mod db;
 mod http_server;
