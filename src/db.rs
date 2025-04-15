@@ -1,5 +1,6 @@
 use arboard::ImageData;
 use rusqlite::{params, Connection};
+use ulid::Ulid;
 use std::fmt::Debug;
 use std::{fs, io::Read};
 use tokio::sync::mpsc::Receiver;
@@ -23,12 +24,13 @@ impl Database {
         //let connection = Connection::open_in_memory()?;
         let sql = "
             CREATE TABLE IF NOT EXISTS files (
-                key INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                key INTEGER NOT NULL PRIMARY KEY,
                 file_name TEXT UNIQUE NOT NULL,
                 content BLOB NOT NULL
             );
             CREATE TABLE IF NOT EXISTS clipboard (
-                key INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                ; using ULID for key, can sort by time, while unique across nodes
+                key TEXT NOT NULL PRIMARY KEY,
                 text_data TEXT,
                 width INTEGER,
                 height INTEGER,
@@ -41,7 +43,7 @@ impl Database {
         Ok(Database { connection })
     }
 
-    fn upload_file(&self, filename: &str, filepath: &str) -> Result<(), String> {
+    fn upload_file(&self, filename: &str, filepath: &str, timestamp: Ulid) -> Result<(), String> {
         println!("opening file from {} with name {}", filepath, filename);
         let mut file = fs::File::open(filepath).expect("cannot open file");
         let mut file_data = Vec::new();
@@ -51,8 +53,8 @@ impl Database {
         let compressed_data = encode_all(&file_data[..], 3).unwrap();
         self.connection
             .execute(
-                "INSERT INTO files (file_name, content) VALUES (?1, ?2)",
-                params![filename, compressed_data],
+                "INSERT INTO files (key, file_name, content) VALUES (?1, ?2)",
+                params![timestamp.to_string(), filename, compressed_data],
             )
             .unwrap();
 
@@ -103,28 +105,28 @@ impl Database {
         result
     }
 
-    fn save_text(&self, text: String) -> Result<usize, rusqlite::Error> {
+    fn save_text(&self, text: String, timestamp: Ulid) -> Result<usize, rusqlite::Error> {
         let query = "
-            INSERT INTO clipboard (text_data) VALUES (?1)
+            INSERT INTO clipboard (key, text_data) VALUES (?1)
         ";
         let mut statement = self
             .connection
             .prepare(query)
             .expect("unable to prepare query");
 
-        statement.execute(params![text])
+        statement.execute(params![timestamp.to_string(), text])
     }
 
-    fn save_image(&self, image: ImageData) -> Result<usize, rusqlite::Error> {
+    fn save_image(&self, image: ImageData, timestamp: Ulid) -> Result<usize, rusqlite::Error> {
         let query = "
-            INSERT INTO clipboard (width, height, image_content) VALUES (?1, ?2, ?3)
+            INSERT INTO clipboard (key, width, height, image_content) VALUES (?1, ?2, ?3)
         ";
         let mut statement = self
             .connection
             .prepare(query)
             .expect("unable to prepare query");
 
-        statement.execute(params![image.width, image.height, image.bytes])
+        statement.execute(params![timestamp.to_string(), image.width, image.height, image.bytes])
     }
 
     fn read_clipboard(&self, offset: usize) -> Result<ClipboardEntry, rusqlite::Error> {
@@ -171,8 +173,9 @@ impl Database {
                 Upload {
                     file_name,
                     file_path,
+                    timestamp
                 } => {
-                    let result = self.upload_file(&file_name, &file_path);
+                    let result = self.upload_file(&file_name, &file_path, timestamp);
                     match result {
                         Ok(()) => {
                             tx.send(Ok(Response::UploadSuccessful))
@@ -196,8 +199,8 @@ impl Database {
                         }
                     }
                 }
-                CopyImage { image } => {
-                    let result = self.save_image(image);
+                CopyImage { image, timestamp } => {
+                    let result = self.save_image(image, timestamp);
                     match result {
                         Ok(_) => {
                             tx.send(Ok(Response::CopySuccessful))
@@ -209,8 +212,8 @@ impl Database {
                         }
                     }
                 }
-                CopyText { text } => {
-                    let result = self.save_text(text);
+                CopyText { text, timestamp } => {
+                    let result = self.save_text(text, timestamp);
                     match result {
                         Ok(_) => {
                             tx.send(Ok(Response::CopySuccessful))
@@ -292,6 +295,7 @@ pub enum DBCommand<'a> {
     Upload {
         file_name: String,
         file_path: String,
+        timestamp: Ulid,
     },
     Download {
         download_path: String,
@@ -299,9 +303,11 @@ pub enum DBCommand<'a> {
     },
     CopyImage {
         image: ImageData<'a>,
+        timestamp: Ulid,
     },
     CopyText {
         text: String,
+        timestamp: Ulid,
     },
     Paste {
         offset: usize,

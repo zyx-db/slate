@@ -7,6 +7,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
     task,
 };
+use ulid::Ulid;
 
 use arboard;
 use libc;
@@ -133,6 +134,7 @@ async fn handle_client(
                 cmd: DBCommand::Upload {
                     file_name: file_name.to_string(),
                     file_path: file_path.to_string(),
+                    timestamp: Ulid::new(),
                 },
                 sender: x,
             };
@@ -206,17 +208,17 @@ async fn handle_client(
             let msg = {
                 if let Ok(text) = clipboard.get_text() {
                     Some(DBMessage {
-                        cmd: DBCommand::CopyText { text },
+                        cmd: DBCommand::CopyText { text, timestamp: Ulid::new() },
                         sender: x,
                     })
                 } else if let Ok(image) = clipboard.get_image() {
                     Some(DBMessage {
-                        cmd: DBCommand::CopyImage { image },
+                        cmd: DBCommand::CopyImage { image, timestamp: Ulid::new() },
                         sender: x,
                     })
                 } else if let Ok(text) = fallback_get_clipboard_hyprland() {
                     Some(DBMessage {
-                        cmd: DBCommand::CopyText { text },
+                        cmd: DBCommand::CopyText { text, timestamp: Ulid::new() },
                         sender: x,
                     })
                 } else {

@@ -6,7 +6,6 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::{
     sync::mpsc::Receiver,
-    task,
     time::{sleep, Duration},
 };
 
@@ -14,6 +13,7 @@ use crate::db::DBMessage;
 
 const REFRESH_NEIGHBORS_TIMEOUT: u64 = 10 * 60 * 1000;
 const ANTI_ENTROPY_TIMEOUT_MS: u64 = 600 * 1 * 1000;
+const PORT: u64 = 3000;
 //const ANTI_ENTROPY_TIMEOUT_MS: u64 = 1 * 60 * 1000;
 
 pub struct Node {
@@ -37,6 +37,16 @@ impl Node {
 
     async fn reload_neighbors(&self) {}
 
+    fn is_outdated(&self,  incoming: HashMap<String, u64>) -> bool {
+        let clock = self.clock.lock().expect("unable to acquire lock");
+        incoming.iter().any(|(key, &incoming_val)| {
+            match clock.get(key) {
+                Some(&local_val) => incoming_val > local_val,
+                None => true
+            }
+        })
+    }
+
     pub async fn listen(
         &self,
         mut rx: Receiver<ControlMessage>,
@@ -54,6 +64,45 @@ impl Node {
             match msg.cmd {
                 ControlCommand::AntiEntropy => {
                     self.reload_neighbors().await;
+                    // we take a snapshot of the neighbors, rather than holding the lock
+                    let neighbors = {
+                        let n = self.neighbors.lock().expect("failed to acquire lock");
+                        n.clone()
+                    };
+
+                    for i in 0..neighbors.len() {
+                        println!("{}", neighbors[i]);
+                            let n = neighbors[i].clone();
+                            let endpoint = format!("http://{}:{}/get_clock", n, PORT);
+                            let resp = reqwest::get(endpoint)
+                                .await
+                                .expect("failed to send message")
+                                .json::<HashMap<String, u64>>()
+                                .await
+                                .expect("failed to parse json");
+
+                            // the incoming clock is newer
+                            if self.is_outdated(resp) {
+                                // we must update our entries first, THEN our keys
+                                let endpoint = format!("http://{}:{}/get_recent_clipboard", n, PORT);
+                                // TODO: actually parse / transmit data
+                                // let data = reqwest::get(endpoint)
+                                //     .await
+                                //     .expect("failed to send message")
+                                //     .json()
+                                //     .await
+                                //     .expect("failed to parse json");
+
+                                // for pair in data {
+                                //     match pair.value {
+                                //         image => {}
+                                //
+                                //     }
+                                // }
+
+                            }
+                            // self.update_clock(resp)
+                    }
                     msg.sender.send(Ok(Response::OK)).expect("failed to reply");
                 }
                 _ => {
