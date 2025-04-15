@@ -11,7 +11,7 @@ use tokio::{
 use arboard;
 use libc;
 
-use crate::control_plane::{trigger_anti_entropy, ControlMessage, Node};
+use crate::control_plane::{trigger_anti_entropy, ControlCommand, ControlMessage, Node};
 use crate::db::{ClipboardWrapper, DBCommand, DBMessage, Database, Response};
 use crate::http_server::run_http_server;
 
@@ -201,6 +201,7 @@ async fn handle_client(
             }
         }
         "copy" => {
+            println!("got msg copy");
             let mut clipboard = arboard::Clipboard::new().expect("unable to open clipboard");
             let msg = {
                 if let Ok(text) = clipboard.get_text() {
@@ -211,6 +212,11 @@ async fn handle_client(
                 } else if let Ok(image) = clipboard.get_image() {
                     Some(DBMessage {
                         cmd: DBCommand::CopyImage { image },
+                        sender: x,
+                    })
+                } else if let Ok(text) = fallback_get_clipboard_hyprland() {
+                    Some(DBMessage {
+                        cmd: DBCommand::CopyText { text },
                         sender: x,
                     })
                 } else {
@@ -227,6 +233,13 @@ async fn handle_client(
                 let response = y.await.expect("failed to read response");
                 match response {
                     Ok(_) => {
+                        let (x, y) = oneshot::channel();
+                        let msg = ControlMessage {
+                            cmd: ControlCommand::Transmit {},
+                            sender: x,
+                        };
+                        // doesnt matter if it fails to go through, we have anti entropy in place
+                        let _ = cp_tx.send(msg).await;
                         format!("successfully copied to db")
                     }
                     Err(e) => {
@@ -299,6 +312,25 @@ pub fn stop_daemon() -> Result<(), ()> {
         fs::remove_file(SOCKET_PATH).unwrap();
         Ok(())
     } else {
+        Err(())
+    }
+}
+
+fn fallback_get_clipboard_hyprland() -> Result<String, ()> {
+    println!("trying to read clipboard via wl-paste");
+    use std::process::Command;
+    let output = Command::new("wl-paste").arg("--no-newline").output().ok();
+
+    if let Some(output) = output {
+        if output.status.success() {
+            println!("read from wl-paste");
+            Ok(String::from_utf8(output.stdout).expect("failed to convert from utf8"))
+        } else {
+            println!("wl-paste failed");
+            Err(())
+        }
+    } else {
+        println!("wl-paste couldnt start?");
         Err(())
     }
 }

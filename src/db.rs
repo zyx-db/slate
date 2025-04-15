@@ -228,6 +228,7 @@ impl Database {
                 } => {
                     let result = self.read_clipboard(offset);
                     let mut completed = true;
+                    use std::thread::sleep;
                     if result.is_ok() {
                         let r = result.unwrap();
                         use ClipboardEntry::*;
@@ -249,6 +250,8 @@ impl Database {
                         println!("failed to read db");
                         completed = false;
                     }
+
+                    sleep(std::time::Duration::from_secs(10));
 
                     if completed {
                         tx.send(Ok(Response::PasteSuccessful))

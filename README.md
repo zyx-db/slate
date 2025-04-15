@@ -13,3 +13,4 @@ WIP
 - cross device sync
 - "service discovery" (will likely just use TailScale API + tags)
 - file compression with zstd (DONE)
+- detect platform at runtime and use wl-copy / wl-paste if need be
