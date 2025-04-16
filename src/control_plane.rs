@@ -2,24 +2,43 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
+use axum::body::to_bytes;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::{
     sync::mpsc::Receiver,
     time::{sleep, Duration},
+    net::UnixStream,
 };
 use ulid::Ulid;
+use serde::Deserialize;
+
+use http::{Request, header::HOST};
+use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
+use hyper_util::client::legacy::Client;
+use hyperlocal::{UnixClientExt, UnixConnector, Uri};
 
 use crate::db::{DBMessage, ClipboardEntry};
 
 const REFRESH_NEIGHBORS_TIMEOUT: u64 = 10 * 60 * 1000;
 const ANTI_ENTROPY_TIMEOUT_MS: u64 = 600 * 1 * 1000;
 const PORT: u64 = 3000;
-//const ANTI_ENTROPY_TIMEOUT_MS: u64 = 1 * 60 * 1000;
+// const ANTI_ENTROPY_TIMEOUT_MS: u64 = 1 * 60 * 1000;
 
 pub struct Node {
     neighbors: Arc<Mutex<Vec<String>>>,
     clock: Arc<Mutex<HashMap<String, u64>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PeerInfo {
+    HostName: String,
+    DNSName: String,
+    OS: String,
+    TailscaleIPs: Vec<String>,
+    PeerAPIURL: Vec<String>,
+    Online: bool,
 }
 
 impl Node {
@@ -36,7 +55,34 @@ impl Node {
 
     async fn gossip(&self) {}
 
-    async fn reload_neighbors(&self) {} 
+    async fn reload_neighbors(&self) {
+        println!("reloading neighbors");
+        let socket_path = "/var/run/tailscale/tailscaled.sock";
+        let url_path = "/localapi/v0/status";
+        let uri = Uri::new(socket_path, url_path);
+
+        let req = Request::get(uri)
+            .header(HOST, "local-tailscaled.sock")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+
+        let client: Client<UnixConnector, Full<Bytes>> = Client::unix();
+
+        // let res = client.get(uri).await.unwrap();
+        let res = client.request(req).await.unwrap();
+        println!("tailscale local api response status {}", res.status());
+        let body = res.collect().await.unwrap().to_bytes();
+        println!("tailscale local api body {}", String::from_utf8_lossy(&body));
+        let json_value: serde_json::Value = serde_json::from_slice(&body).expect("failed to parse json");
+
+        // Extract just the "Peer" object
+        let peers_json = &json_value["Peer"];
+        let peers: HashMap<String, PeerInfo> = serde_json::from_value(peers_json.clone()).unwrap();
+
+        for (node_key, info) in peers {
+            println!("{}: {:?}", node_key, info);
+        }
+    }
 
     fn is_outdated(&self, incoming: &HashMap<String, u64>) -> bool {
         let clock = self.clock.lock().expect("unable to acquire lock");

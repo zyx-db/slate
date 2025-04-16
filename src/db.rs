@@ -15,7 +15,6 @@ pub struct Database {
     connection: Connection,
 }
 
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SerializableImage {
     width: usize,
