@@ -70,7 +70,7 @@ async fn run_daemon() -> std::io::Result<()> {
     let (control_tx, rx) = mpsc::channel(100);
     let db_tx = database_tx.clone();
     task::spawn(async move {
-        let node = Node::new();
+        let node = Node::new().await;
         node.listen(rx, db_tx).await;
     });
 
@@ -82,8 +82,9 @@ async fn run_daemon() -> std::io::Result<()> {
 
     // http task
     let db_tx_http = database_tx.clone();
+    let c_tx_http = control_tx.clone();
     task::spawn(async move {
-        run_http_server(db_tx_http).await;
+        run_http_server(db_tx_http, c_tx_http).await;
     });
 
     // create PID file and a SOCKET file for daemon

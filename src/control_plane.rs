@@ -2,7 +2,6 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
-use axum::body::to_bytes;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::{
@@ -11,7 +10,7 @@ use tokio::{
     net::UnixStream,
 };
 use ulid::Ulid;
-use serde::Deserialize;
+use serde::{Serialize, Deserialize};
 
 use http::{Request, header::HOST};
 use http_body_util::{BodyExt, Full};
@@ -27,23 +26,45 @@ const PORT: u64 = 3000;
 // const ANTI_ENTROPY_TIMEOUT_MS: u64 = 1 * 60 * 1000;
 
 pub struct Node {
-    neighbors: Arc<Mutex<Vec<String>>>,
+    host_name: String,
+    neighbors: Arc<Mutex<Vec<PeerInfo>>>,
     clock: Arc<Mutex<HashMap<String, u64>>>,
 }
 
-#[derive(Debug, Deserialize)]
-struct PeerInfo {
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PeerInfo {
     HostName: String,
-    DNSName: String,
-    OS: String,
     TailscaleIPs: Vec<String>,
-    PeerAPIURL: Vec<String>,
     Online: bool,
 }
 
 impl Node {
-    pub fn new() -> Self {
+    pub async fn new() -> Self {
+        let host_name = {
+            let socket_path = "/var/run/tailscale/tailscaled.sock";
+            let url_path = "/localapi/v0/status";
+            let uri = Uri::new(socket_path, url_path);
+
+            let req = Request::get(uri)
+                .header(HOST, "local-tailscaled.sock")
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+
+            let client: Client<UnixConnector, Full<Bytes>> = Client::unix();
+
+            // let res = client.get(uri).await.unwrap();
+            let res = client.request(req).await.unwrap();
+            println!("tailscale local api response status {}", res.status());
+            let body = res.collect().await.unwrap().to_bytes();
+            println!("tailscale local api body {}", String::from_utf8_lossy(&body));
+            let json_value: serde_json::Value = serde_json::from_slice(&body).expect("failed to parse json");
+
+            // Extract just the "Peer" object
+            let name_json = &json_value["Self"]["HostName"];
+            serde_json::from_value(name_json.clone()).unwrap()
+        };
         Node {
+            host_name,
             neighbors: Arc::new(Mutex::new(Vec::new())),
             clock: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -79,9 +100,14 @@ impl Node {
         let peers_json = &json_value["Peer"];
         let peers: HashMap<String, PeerInfo> = serde_json::from_value(peers_json.clone()).unwrap();
 
-        for (node_key, info) in peers {
+        for (node_key, info) in &peers {
             println!("{}: {:?}", node_key, info);
         }
+
+        let neighbors: Vec<PeerInfo> = peers.into_values().collect();
+        let mut cur = self.neighbors.lock().expect("failed to acquire lock");
+        cur.clear();
+        cur.extend(neighbors);
     }
 
     fn is_outdated(&self, incoming: &HashMap<String, u64>) -> bool {
@@ -160,32 +186,44 @@ impl Node {
                     };
 
                     for i in 0..neighbors.len() {
-                        println!("{}", neighbors[i]);
-                            let n = neighbors[i].clone();
-                            let endpoint = format!("http://{}:{}/clock", n, PORT);
-                            let incoming_clock = reqwest::get(endpoint)
+                        println!("{:?}", neighbors[i]);
+                        // no point in pinging if they are offline anyway
+                        if !neighbors[i].Online {
+                            continue
+                        }
+                        let ip = neighbors[i].TailscaleIPs[0].clone();
+                        let endpoint = format!("http://{}:{}/clock", ip, PORT);
+                        let incoming_clock = reqwest::get(endpoint)
+                            .await
+                            .expect("failed to send message")
+                            .json::<HashMap<String, u64>>()
+                            .await
+                            .expect("failed to parse json");
+
+                        // the incoming clock is newer
+                        if self.is_outdated(&incoming_clock) {
+                            // we must update our entries first, THEN our keys
+                            let endpoint = format!("http://{}:{}/recent_clipboard", ip, PORT);
+                            // TODO: actually parse / transmit data
+                            let incoming_updates = reqwest::get(endpoint)
                                 .await
                                 .expect("failed to send message")
-                                .json::<HashMap<String, u64>>()
+                                .json()
                                 .await
                                 .expect("failed to parse json");
 
-                            // the incoming clock is newer
-                            if self.is_outdated(&incoming_clock) {
-                                // we must update our entries first, THEN our keys
-                                let endpoint = format!("http://{}:{}/recent_clipboard", n, PORT);
-                                // TODO: actually parse / transmit data
-                                let incoming_updates = reqwest::get(endpoint)
-                                     .await
-                                     .expect("failed to send message")
-                                     .json()
-                                     .await
-                                     .expect("failed to parse json");
-
-                                self.update_values(&incoming_updates, &incoming_clock, &mut tx).await;
-                            }
+                            self.update_values(&incoming_updates, &incoming_clock, &mut tx).await;
+                        }
                     }
                     msg.sender.send(Ok(Response::OK)).expect("failed to reply");
+                }
+                ControlCommand::GetNeighbors => {
+                    self.reload_neighbors().await;
+                    let info = {
+                        let n = self.neighbors.lock().expect("failed to acquire lock");
+                        n.clone()
+                    };
+                    msg.sender.send(Ok(Response::Neighbors { info })).expect("failed to reply");
                 }
                 _ => {
                     msg.sender.send(Ok(Response::OK)).expect("failed to reply");
@@ -199,11 +237,13 @@ impl Node {
 pub enum ControlCommand {
     AntiEntropy,
     Transmit {},
+    GetNeighbors,
 }
 
 #[derive(Debug)]
 pub enum Response {
     OK,
+    Neighbors {info: Vec<PeerInfo>}
 }
 
 #[derive(Debug)]
@@ -216,7 +256,6 @@ pub async fn trigger_anti_entropy(tx: mpsc::Sender<ControlMessage>) {
     println!("anti entropy trigger started!");
     let duration = Duration::from_millis(ANTI_ENTROPY_TIMEOUT_MS);
     loop {
-        sleep(duration).await;
         println!("anti entropy trigger!");
         let (x, y) = oneshot::channel();
         let msg = ControlMessage {
@@ -233,5 +272,6 @@ pub async fn trigger_anti_entropy(tx: mpsc::Sender<ControlMessage>) {
                 println!("{:?}", e);
             }
         }
+        sleep(duration).await;
     }
 }

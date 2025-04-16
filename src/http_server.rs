@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use axum::{routing::get, Extension, Json, Router};
 use tokio::sync::{mpsc::{Receiver, Sender}, oneshot};
 
-use crate::db::{DBMessage, ClipboardEntry};
+use crate::{control_plane::PeerInfo, db::{ClipboardEntry, DBMessage}};
+use crate::control_plane::ControlMessage;
 
 
 async fn health_check() -> &'static str {
@@ -33,18 +34,39 @@ async fn recent_clipboard(Extension(tx): Extension<Sender<DBMessage>>) -> Json<V
     else {
         Json(Vec::new())
     }
-
 }
 
-pub async fn run_http_server(tx: Sender<DBMessage>) {
+async fn neighbors(Extension(tx): Extension<Sender<ControlMessage>>) -> Json<Vec<PeerInfo>> {
+    let (x, y) = oneshot::channel();
+    let msg = ControlMessage {
+        cmd: crate::control_plane::ControlCommand::GetNeighbors,
+        sender: x
+    };
+    tx.send(msg).await.expect("failed to send db message");
+
+    let resp = y.await.expect("failed to read response");
+    if let Ok(crate::control_plane::Response::Neighbors { info }) = resp {
+        for x in &info {
+            println!("{:?}", x);
+        }
+        Json(info)
+    }
+    else {
+        Json(Vec::new())
+    }
+}
+
+pub async fn run_http_server(dtx: Sender<DBMessage>, ctx: Sender<ControlMessage>) {
     let app = Router::new()
         //.nest()
         .route("/health", get(health_check))
         .route("/clock", get(clock))
         .route("/recent_clipboard", get(recent_clipboard))
-        .layer(Extension(tx));
+        .route("/neighbors", get(neighbors))
+        .layer(Extension(dtx))
+        .layer(Extension(ctx));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     println!("running on localhost:3000");
     axum::serve(listener, app).await.expect("failed to start server");
 }
