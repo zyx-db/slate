@@ -1,11 +1,13 @@
 use arboard::ImageData;
 use rusqlite::{params, Connection};
 use ulid::Ulid;
+use std::borrow::Cow;
 use std::fmt::Debug;
 use std::{fs, io::Read};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot::Sender;
 use zstd::stream::encode_all;
+use serde::{Deserialize, Serialize};
 
 const DATABASE_PATH: &str = "/tmp/slate_daemon.sqlite";
 
@@ -13,8 +15,37 @@ pub struct Database {
     connection: Connection,
 }
 
-enum ClipboardEntry<'a> {
-    Image(ImageData<'a>),
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SerializableImage {
+    width: usize,
+    height: usize,
+    bytes: Vec<u8>, // owned!
+}
+
+impl<'a> From<ImageData<'a>> for SerializableImage {
+    fn from(img: ImageData<'a>) -> Self {
+        Self {
+            width: img.width,
+            height: img.height,
+            bytes: img.bytes.to_vec(),
+        }
+    }
+}
+
+impl<'a> Into<ImageData<'a>> for SerializableImage {
+    fn into(self) -> ImageData<'a> {
+        ImageData {
+            width: self.width,
+            height: self.height,
+            bytes: Cow::Owned(self.bytes),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ClipboardEntry {
+    Image(SerializableImage),
     Text(String),
 }
 
@@ -29,7 +60,7 @@ impl Database {
                 content BLOB NOT NULL
             );
             CREATE TABLE IF NOT EXISTS clipboard (
-                ; using ULID for key, can sort by time, while unique across nodes
+                -- using ULID for key, can sort by time, while unique across nodes
                 key TEXT NOT NULL PRIMARY KEY,
                 text_data TEXT,
                 width INTEGER,
@@ -107,7 +138,7 @@ impl Database {
 
     fn save_text(&self, text: String, timestamp: Ulid) -> Result<usize, rusqlite::Error> {
         let query = "
-            INSERT INTO clipboard (key, text_data) VALUES (?1)
+            INSERT INTO clipboard (key, text_data) VALUES (?1, ?2)
         ";
         let mut statement = self
             .connection
@@ -117,7 +148,7 @@ impl Database {
         statement.execute(params![timestamp.to_string(), text])
     }
 
-    fn save_image(&self, image: ImageData, timestamp: Ulid) -> Result<usize, rusqlite::Error> {
+    fn save_image(&self, image: SerializableImage, timestamp: Ulid) -> Result<usize, rusqlite::Error> {
         let query = "
             INSERT INTO clipboard (key, width, height, image_content) VALUES (?1, ?2, ?3)
         ";
@@ -152,10 +183,10 @@ impl Database {
             if let Some(t) = text {
                 return Ok(ClipboardEntry::Text(t));
             } else if let (Some(w), Some(h), Some(img)) = (width, height, &content) {
-                return Ok(ClipboardEntry::Image(ImageData {
+                return Ok(ClipboardEntry::Image(SerializableImage {
                     width: w,
                     height: h,
-                    bytes: std::borrow::Cow::Owned(img.clone()),
+                    bytes: img.clone(),
                 }));
             } else {
                 Err(rusqlite::Error::QueryReturnedNoRows)
@@ -163,7 +194,47 @@ impl Database {
         })
     }
 
-    pub async fn listen(self, mut rx: Receiver<DBMessage<'_>>) {
+    pub fn get_recent(&self, limit: u64) -> Result<Vec<(ClipboardEntry, String)>, rusqlite::Error> {
+        let query = "
+            SELECT c.key, c.text_data, c.width, c.height, c.image_content
+            FROM clipboard c
+            ORDER BY c.key DESC
+            LIMIT ?;
+        ";
+
+        let mut statement = self
+            .connection
+            .prepare(query)
+            .expect("unable to prepare query");
+
+        let rows = statement.query_map(params![limit], |row| {
+            let key: String = row.get(0)?;
+            let text: Option<String> = row.get(1)?;
+            let width: Option<usize> = row.get(2)?;
+            let height: Option<usize> = row.get(3)?;
+            let content: Option<Vec<u8>> = row.get(4)?;
+
+            let entry = if let Some(t) = text {
+                ClipboardEntry::Text(t)
+            } else if let (Some(w), Some(h), Some(img)) = (width, height, content) {
+                ClipboardEntry::Image(SerializableImage {
+                    width: w,
+                    height: h,
+                    bytes: img,
+                })
+            } else {
+                // Gracefully skip invalid row
+                return Err(rusqlite::Error::InvalidQuery);
+            };
+
+            Ok((entry, key))
+        })?;
+
+        // Collecting into Vec
+        rows.collect()
+    }
+
+    pub async fn listen(self, mut rx: Receiver<DBMessage>) {
         println!("db started!");
         while let Some(msg) = rx.recv().await {
             let tx = msg.sender;
@@ -231,12 +302,12 @@ impl Database {
                 } => {
                     let result = self.read_clipboard(offset);
                     let mut completed = true;
-                    use std::thread::sleep;
                     if result.is_ok() {
                         let r = result.unwrap();
                         use ClipboardEntry::*;
                         match r {
                             Image(i) => {
+                                let i = i.into();
                                 if (clipboard.inner.set_image(i)).is_err() {
                                     println!("failed to set image");
                                     completed = false;
@@ -253,8 +324,6 @@ impl Database {
                         println!("failed to read db");
                         completed = false;
                     }
-
-                    sleep(std::time::Duration::from_secs(10));
 
                     if completed {
                         tx.send(Ok(Response::PasteSuccessful))
@@ -274,6 +343,18 @@ impl Database {
                             .expect("failed to send response");
                     }
                 },
+                Recent { length } => {
+                    match self.get_recent(length) {
+                        Ok (res) => {
+                            tx.send(Ok(Response::Recent { values: res }))
+                                .expect("failed to send response");
+                        }
+                        Err (e) => {
+                            tx.send(Err(e.to_string()))
+                                .expect("failed to send response");
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -291,7 +372,7 @@ impl Debug for ClipboardWrapper {
 }
 
 #[derive(Debug)]
-pub enum DBCommand<'a> {
+pub enum DBCommand {
     Upload {
         file_name: String,
         file_path: String,
@@ -302,7 +383,7 @@ pub enum DBCommand<'a> {
         file_name: String,
     },
     CopyImage {
-        image: ImageData<'a>,
+        image: SerializableImage,
         timestamp: Ulid,
     },
     CopyText {
@@ -315,6 +396,9 @@ pub enum DBCommand<'a> {
     },
     ListFiles,
     History,
+    Recent {
+        length: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -324,10 +408,11 @@ pub enum Response {
     PasteSuccessful,
     Files { names: Vec<String> },
     History { names: Vec<String> },
+    Recent { values: Vec<(ClipboardEntry, String)> }
 }
 
 #[derive(Debug)]
-pub struct DBMessage<'a> {
-    pub cmd: DBCommand<'a>,
+pub struct DBMessage {
+    pub cmd: DBCommand,
     pub sender: Sender<Result<Response, String>>,
 }

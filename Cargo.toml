@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arboard = "3.4.1"
+arboard = { version = "3.4.1", features = ["wayland-data-control", "wl-clipboard-rs"] }
 axum = "0.8.1"
 clap = { version = "4.5.32", features = ["derive"] }
 libc = "0.2.171"

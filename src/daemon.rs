@@ -81,8 +81,9 @@ async fn run_daemon() -> std::io::Result<()> {
     });
 
     // http task
+    let db_tx_http = database_tx.clone();
     task::spawn(async move {
-        run_http_server().await;
+        run_http_server(db_tx_http).await;
     });
 
     // create PID file and a SOCKET file for daemon
@@ -110,7 +111,7 @@ async fn run_daemon() -> std::io::Result<()> {
 
 async fn handle_client(
     mut stream: UnixStream,
-    tx: mpsc::Sender<DBMessage<'_>>,
+    tx: mpsc::Sender<DBMessage>,
     cp_tx: mpsc::Sender<ControlMessage>,
 ) {
     let mut reader = BufReader::new(&mut stream);
@@ -213,7 +214,7 @@ async fn handle_client(
                     })
                 } else if let Ok(image) = clipboard.get_image() {
                     Some(DBMessage {
-                        cmd: DBCommand::CopyImage { image, timestamp: Ulid::new() },
+                        cmd: DBCommand::CopyImage { image: image.into(), timestamp: Ulid::new() },
                         sender: x,
                     })
                 } else if let Ok(text) = fallback_get_clipboard_hyprland() {

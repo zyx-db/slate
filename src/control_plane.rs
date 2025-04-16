@@ -8,8 +8,9 @@ use tokio::{
     sync::mpsc::Receiver,
     time::{sleep, Duration},
 };
+use ulid::Ulid;
 
-use crate::db::DBMessage;
+use crate::db::{DBMessage, ClipboardEntry};
 
 const REFRESH_NEIGHBORS_TIMEOUT: u64 = 10 * 60 * 1000;
 const ANTI_ENTROPY_TIMEOUT_MS: u64 = 600 * 1 * 1000;
@@ -35,9 +36,9 @@ impl Node {
 
     async fn gossip(&self) {}
 
-    async fn reload_neighbors(&self) {}
+    async fn reload_neighbors(&self) {} 
 
-    fn is_outdated(&self,  incoming: HashMap<String, u64>) -> bool {
+    fn is_outdated(&self, incoming: &HashMap<String, u64>) -> bool {
         let clock = self.clock.lock().expect("unable to acquire lock");
         incoming.iter().any(|(key, &incoming_val)| {
             match clock.get(key) {
@@ -47,10 +48,52 @@ impl Node {
         })
     }
 
+    async fn update_values(&self, incoming_updates: &Vec<(ClipboardEntry, String)>, incoming_clock: &HashMap<String, u64>, tx: &mut mpsc::Sender<DBMessage>) {
+        for update in incoming_updates {
+            let (entry, timestamp) = update;
+            let timestamp = Ulid::from_string(&timestamp).expect("failed to parse ulid");
+            let (x, y) = oneshot::channel();
+            let msg = match entry{
+                ClipboardEntry::Image( i ) => {
+                    let i = (*i).clone();
+                    let i = i.into();
+                    DBMessage {
+                        cmd: crate::db::DBCommand::CopyImage { image: i, timestamp },
+                        sender: x
+                    } 
+                },
+                ClipboardEntry::Text ( t ) => {
+                    DBMessage {
+                        cmd: crate::db::DBCommand::CopyText { text: t.clone(), timestamp },
+                        sender: x
+                    } 
+                }
+            };
+            tx.send(msg).await.expect("couldnt send msg");
+            let _ = y.await.expect("failed to read response"); 
+        }
+
+        let mut updating_clock = self.clock.lock().expect("failed to acquire lock");
+        for (key, value) in incoming_clock {
+            let new_value = match updating_clock.get(key) {
+                Some( old_value ) => {
+                    if old_value > value {
+                        *old_value
+                    }
+                    else {
+                        *value
+                    }
+                }
+                None => *value
+            };
+            let _ = updating_clock.insert(key.clone(), new_value);
+        }
+    }
+
     pub async fn listen(
         &self,
         mut rx: Receiver<ControlMessage>,
-        mut tx: mpsc::Sender<DBMessage<'_>>,
+        mut tx: mpsc::Sender<DBMessage>,
     ) {
         println!("control plane started!");
 
@@ -73,8 +116,8 @@ impl Node {
                     for i in 0..neighbors.len() {
                         println!("{}", neighbors[i]);
                             let n = neighbors[i].clone();
-                            let endpoint = format!("http://{}:{}/get_clock", n, PORT);
-                            let resp = reqwest::get(endpoint)
+                            let endpoint = format!("http://{}:{}/clock", n, PORT);
+                            let incoming_clock = reqwest::get(endpoint)
                                 .await
                                 .expect("failed to send message")
                                 .json::<HashMap<String, u64>>()
@@ -82,26 +125,19 @@ impl Node {
                                 .expect("failed to parse json");
 
                             // the incoming clock is newer
-                            if self.is_outdated(resp) {
+                            if self.is_outdated(&incoming_clock) {
                                 // we must update our entries first, THEN our keys
-                                let endpoint = format!("http://{}:{}/get_recent_clipboard", n, PORT);
+                                let endpoint = format!("http://{}:{}/recent_clipboard", n, PORT);
                                 // TODO: actually parse / transmit data
-                                // let data = reqwest::get(endpoint)
-                                //     .await
-                                //     .expect("failed to send message")
-                                //     .json()
-                                //     .await
-                                //     .expect("failed to parse json");
+                                let incoming_updates = reqwest::get(endpoint)
+                                     .await
+                                     .expect("failed to send message")
+                                     .json()
+                                     .await
+                                     .expect("failed to parse json");
 
-                                // for pair in data {
-                                //     match pair.value {
-                                //         image => {}
-                                //
-                                //     }
-                                // }
-
+                                self.update_values(&incoming_updates, &incoming_clock, &mut tx).await;
                             }
-                            // self.update_clock(resp)
                     }
                     msg.sender.send(Ok(Response::OK)).expect("failed to reply");
                 }
