@@ -214,7 +214,7 @@ impl Database {
     ) -> Result<usize, rusqlite::Error> {
         self.inc_self_counter()?;
         let query = "
-            INSERT INTO clipboard (key, width, height, image_content) VALUES (?1, ?2, ?3)
+            INSERT INTO clipboard (key, width, height, image_content) VALUES (?1, ?2, ?3, ?4)
         ";
         let mut statement = self
             .connection

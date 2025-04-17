@@ -53,12 +53,7 @@ impl Node {
 
             // let res = client.get(uri).await.unwrap();
             let res = client.request(req).await.unwrap();
-            println!("tailscale local api response status {}", res.status());
             let body = res.collect().await.unwrap().to_bytes();
-            println!(
-                "tailscale local api body {}",
-                String::from_utf8_lossy(&body)
-            );
             let json_value: serde_json::Value =
                 serde_json::from_slice(&body).expect("failed to parse json");
 
@@ -120,22 +115,13 @@ impl Node {
 
         // let res = client.get(uri).await.unwrap();
         let res = client.request(req).await.unwrap();
-        println!("tailscale local api response status {}", res.status());
         let body = res.collect().await.unwrap().to_bytes();
-        println!(
-            "tailscale local api body {}",
-            String::from_utf8_lossy(&body)
-        );
         let json_value: serde_json::Value =
             serde_json::from_slice(&body).expect("failed to parse json");
 
         // Extract just the "Peer" object
         let peers_json = &json_value["Peer"];
         let peers: HashMap<String, PeerInfo> = serde_json::from_value(peers_json.clone()).unwrap();
-
-        for (node_key, info) in &peers {
-            println!("{}: {:?}", node_key, info);
-        }
 
         let neighbors: Vec<PeerInfo> = peers.into_values().collect();
         let mut cur = self.neighbors.lock().expect("failed to acquire lock");
