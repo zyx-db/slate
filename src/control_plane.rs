@@ -20,10 +20,8 @@ use hyperlocal::{UnixClientExt, UnixConnector, Uri};
 
 use crate::db::{ClipboardEntry, DBMessage};
 
-const REFRESH_NEIGHBORS_TIMEOUT: u64 = 10 * 60 * 1000;
-// const ANTI_ENTROPY_TIMEOUT_MS: u64 = 600 * 1 * 1000;
 const PORT: u64 = 3000;
-const ANTI_ENTROPY_TIMEOUT_MS: u64 = 1 * 60 * 1000;
+const ANTI_ENTROPY_TIMEOUT_MS: u64 = 3 * 60 * 1000;
 
 pub struct Node {
     host_name: String,
@@ -96,9 +94,25 @@ impl Node {
         let _ = y.await;
     }
 
-    async fn read(&self) {}
+    async fn gossip(&self, data: ClipboardEntry, neighbor_count: u64, ttl: u64) {
+        self.reload_neighbors().await;
 
-    async fn gossip(&self) {}
+        let mut sent = 0;
+        let neighbors = {
+            let n = self.neighbors.lock().expect("failed to acquire lock");
+            n.clone()
+        };
+        for n in neighbors {
+            if !n.Online {
+                continue;
+            };
+            let ip = n.TailscaleIPs[0].clone();
+            let endpoint = format!("http://{}:{}/gossip", ip, PORT);
+            // TODO: 
+            // format body
+            // actually post data
+        }
+    }
 
     async fn reload_neighbors(&self) {
         println!("reloading neighbors");
@@ -182,7 +196,7 @@ impl Node {
         let mut updating_clock = self.get_clock(tx).await;
         println!(
             "READING THE OLD CLOCK AS {:?}", updating_clock
-            );
+        );
         for (key, value) in incoming_clock {
             let new_value = match updating_clock.get(key) {
                 Some(old_value) => {
@@ -198,7 +212,7 @@ impl Node {
         }
         println!(
             "SAVING THE NEW CLOCK AS {:?}", updating_clock
-            );
+        );
         self.save_clock(updating_clock, tx).await;
     }
 
@@ -218,11 +232,6 @@ impl Node {
             let status = y.await.expect("failed to recieve msg");
             status.expect("did not create self row?");
         }
-
-        //let tx2 = tx.clone();
-        //task::spawn(async move {
-        //    self.background_events(tx2).await;
-        //});
 
         while let Some(msg) = rx.recv().await {
             println!("recieved command: {:?}", msg.cmd);
@@ -260,7 +269,6 @@ impl Node {
                         if self.is_outdated(&incoming_clock, &mut tx).await {
                             // we must update our entries first, THEN our keys
                             let endpoint = format!("http://{}:{}/recent_clipboard", ip, PORT);
-                            // TODO: actually parse / transmit data
                             let incoming_updates = reqwest::get(endpoint)
                                 .await
                                 .expect("failed to send message")
@@ -283,13 +291,16 @@ impl Node {
                     msg.sender
                         .send(Ok(Response::Neighbors { info }))
                         .expect("failed to reply");
-                }
+                    }
                 ControlCommand::GetClock => {
                     let mut clone_tx = tx.clone();
                     let data = self.get_clock(&mut clone_tx).await;
                     msg.sender
                         .send(Ok(Response::Clock { data }))
                         .expect("failed to reply");
+                    }
+                ControlCommand::Transmit { data } => {
+                    self.gossip(data, MAX_PER_ROUND, TTL).await;
                 }
                 _ => {
                     msg.sender.send(Ok(Response::OK)).expect("failed to reply");

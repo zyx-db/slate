@@ -70,6 +70,12 @@ async fn neighbors(Extension(tx): Extension<Sender<ControlMessage>>) -> Json<Vec
 }
 
 pub async fn run_http_server(dtx: Sender<DBMessage>, ctx: Sender<ControlMessage>) {
+    // TODO:
+    // handle POST /gossip
+    // body contains a Clock, ClipboardEntry, and a TTL
+    // if the clock is old, ignore
+    // update values as needed
+    // if TTL > 0, retransmit
     let app = Router::new()
         //.nest()
         .route("/health", get(health_check))
