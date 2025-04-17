@@ -236,7 +236,6 @@ impl Node {
                     };
 
                     for i in 0..neighbors.len() {
-                        println!("{:?}", neighbors[i]);
                         // no point in pinging if they are offline anyway
                         if !neighbors[i].Online {
                             continue;
