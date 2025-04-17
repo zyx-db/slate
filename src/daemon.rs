@@ -211,8 +211,8 @@ async fn handle_client(
             let msg = {
                 if let Ok(text) = clipboard.get_text() {
                     Some(DBMessage {
-                        cmd: DBCommand::CopyText {
-                            text,
+                        cmd: DBCommand::CopyData {
+                            data: crate::db::ClipboardEntry::Text(text),
                             timestamp: Ulid::new(),
                             local: true
                         },
@@ -220,8 +220,8 @@ async fn handle_client(
                     })
                 } else if let Ok(image) = clipboard.get_image() {
                     Some(DBMessage {
-                        cmd: DBCommand::CopyImage {
-                            image: image.into(),
+                        cmd: DBCommand::CopyData {
+                            data: crate::db::ClipboardEntry::Image(image.into()),
                             timestamp: Ulid::new(),
                             local: true
                         },
@@ -229,13 +229,27 @@ async fn handle_client(
                     })
                 } else if let Ok(text) = fallback_get_clipboard_hyprland() {
                     Some(DBMessage {
-                        cmd: DBCommand::CopyText {
-                            text,
+                        cmd: DBCommand::CopyData {
+                            data: crate::db::ClipboardEntry::Text(text),
                             timestamp: Ulid::new(),
                             local: true
                         },
                         sender: x,
                     })
+                } else {
+                    eprintln!("failed to get text: {}", clipboard.get_text().unwrap_err());
+                    None
+                }
+            };
+
+            // TODO: combine this and above
+            let data = {
+                if let Ok(text) = clipboard.get_text() {
+                    Some(crate::db::ClipboardEntry::Text(text))
+                } else if let Ok(image) = clipboard.get_image() {
+                    Some(crate::db::ClipboardEntry::Image(image.into()))
+                } else if let Ok(text) = fallback_get_clipboard_hyprland() {
+                    Some(crate::db::ClipboardEntry::Text(text))
                 } else {
                     eprintln!("failed to get text: {}", clipboard.get_text().unwrap_err());
                     None
@@ -252,7 +266,10 @@ async fn handle_client(
                     Ok(_) => {
                         let (x, y) = oneshot::channel();
                         let msg = ControlMessage {
-                            cmd: ControlCommand::Transmit {},
+                            cmd: ControlCommand::Transmit {
+                                data: data.unwrap(),
+                                ttl: None
+                            },
                             sender: x,
                         };
                         // doesnt matter if it fails to go through, we have anti entropy in place

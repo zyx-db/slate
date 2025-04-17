@@ -11,6 +11,7 @@ use ulid::Ulid;
 use zstd::stream::encode_all;
 
 const DATABASE_PATH: &str = "/tmp/slate_daemon.sqlite";
+pub type Clock = HashMap<String, u64>;
 
 pub struct Database {
     connection: Connection,
@@ -43,7 +44,7 @@ impl<'a> Into<ImageData<'a>> for SerializableImage {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ClipboardEntry {
     Image(SerializableImage),
     Text(String),
@@ -79,7 +80,7 @@ impl Database {
         Ok(Database { connection })
     }
 
-    fn sync_clock(&self, clock_map: &HashMap<String, u64>) -> Result<(), rusqlite::Error> {
+    fn sync_clock(&self, clock_map: &Clock) -> Result<(), rusqlite::Error> {
         if clock_map.is_empty() {
             return Ok(());
         }
@@ -106,7 +107,7 @@ impl Database {
         Ok(())
     }
 
-    fn load_clock(&self) -> Result<HashMap<String, u64>, rusqlite::Error> {
+    fn load_clock(&self) -> Result<Clock, rusqlite::Error> {
         let mut stmt = self.connection.prepare("SELECT key, time FROM clock")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
@@ -359,21 +360,11 @@ impl Database {
                         }
                     }
                 }
-                CopyImage { image, timestamp, local} => {
-                    let result = self.save_image(image, timestamp, local);
-                    match result {
-                        Ok(_) => {
-                            tx.send(Ok(Response::Success))
-                                .expect("failed to send response");
-                        }
-                        Err(e) => {
-                            tx.send(Err(e.to_string()))
-                                .expect("failed to send response");
-                        }
-                    }
-                }
-                CopyText { text, timestamp, local } => {
-                    let result = self.save_text(text, timestamp, local);
+                CopyData { data, timestamp, local} => {
+                    let result = match data {
+                        ClipboardEntry::Text(t) => self.save_text(t, timestamp, local),
+                        ClipboardEntry::Image(i) => self.save_image(i, timestamp, local)
+                    };
                     match result {
                         Ok(_) => {
                             tx.send(Ok(Response::Success))
@@ -500,13 +491,8 @@ pub enum DBCommand {
         download_path: String,
         file_name: String,
     },
-    CopyImage {
-        image: SerializableImage,
-        timestamp: Ulid,
-        local: bool,
-    },
-    CopyText {
-        text: String,
+    CopyData {
+        data: ClipboardEntry,
         timestamp: Ulid,
         local: bool
     },
@@ -524,7 +510,7 @@ pub enum DBCommand {
     },
     LoadClock,
     SaveClock {
-        clock: HashMap<String, u64>,
+        clock: Clock,
     },
 }
 
@@ -541,7 +527,7 @@ pub enum Response {
         values: Vec<(ClipboardEntry, String)>,
     },
     Clock {
-        data: HashMap<String, u64>,
+        data: Clock,
     },
 }
 

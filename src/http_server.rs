@@ -6,17 +6,16 @@ use tokio::sync::{
     oneshot,
 };
 
-use crate::control_plane::ControlMessage;
 use crate::{
-    control_plane::PeerInfo,
-    db::{ClipboardEntry, DBMessage},
+    control_plane::{PeerInfo, ControlMessage},
+    db::{ClipboardEntry, DBMessage, Clock},
 };
 
 async fn health_check() -> &'static str {
     "hai"
 }
 
-async fn clock(Extension(tx): Extension<Sender<ControlMessage>>) -> Json<HashMap<String, u64>> {
+async fn clock(Extension(tx): Extension<Sender<ControlMessage>>) -> Json<Clock> {
     let (x, y) = oneshot::channel();
     tx.send(ControlMessage {
         cmd: crate::control_plane::ControlCommand::GetClock,

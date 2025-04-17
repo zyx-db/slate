@@ -18,21 +18,30 @@ use hyper::body::Bytes;
 use hyper_util::client::legacy::Client;
 use hyperlocal::{UnixClientExt, UnixConnector, Uri};
 
-use crate::db::{ClipboardEntry, DBMessage};
+use crate::db::{ClipboardEntry, DBMessage, Clock};
 
 const PORT: u64 = 3000;
 const ANTI_ENTROPY_TIMEOUT_MS: u64 = 3 * 60 * 1000;
-
-pub struct Node {
-    host_name: String,
-    neighbors: Arc<Mutex<Vec<PeerInfo>>>,
-}
+const TTL: u64 = 1;
+const MAX_PER_ROUND: u64 = 5;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PeerInfo {
     HostName: String,
     TailscaleIPs: Vec<String>,
     Online: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct Gossip {
+    clock: Clock,
+    entry: ClipboardEntry,
+    ttl: u64
+}
+
+pub struct Node {
+    host_name: String,
+    neighbors: Arc<Mutex<Vec<PeerInfo>>>,
 }
 
 impl Node {
@@ -65,7 +74,7 @@ impl Node {
         }
     }
 
-    async fn get_clock(&self, tx: &mut mpsc::Sender<DBMessage>) -> HashMap<String, u64> {
+    async fn get_clock(&self, tx: &mut mpsc::Sender<DBMessage>) -> Clock {
         let (x, y) = oneshot::channel();
         let msg = DBMessage {
             cmd: crate::db::DBCommand::LoadClock,
@@ -83,7 +92,7 @@ impl Node {
         }
     }
 
-    async fn save_clock(&self, clock: HashMap<String, u64>, tx: &mut mpsc::Sender<DBMessage>) {
+    async fn save_clock(&self, clock: Clock, tx: &mut mpsc::Sender<DBMessage>) {
         let (x, y) = oneshot::channel();
         let msg = DBMessage {
             cmd: crate::db::DBCommand::SaveClock { clock },
@@ -94,23 +103,39 @@ impl Node {
         let _ = y.await;
     }
 
-    async fn gossip(&self, data: ClipboardEntry, neighbor_count: u64, ttl: u64) {
+    async fn gossip(&self, entry: ClipboardEntry, neighbor_count: u64, ttl: u64, tx: &mut mpsc::Sender<DBMessage>) {
         self.reload_neighbors().await;
-
-        let mut sent = 0;
         let neighbors = {
             let n = self.neighbors.lock().expect("failed to acquire lock");
             n.clone()
         };
+        let clock = self.get_clock(tx).await;
+        let client = reqwest::Client::new();
+
+        let mut sent = 0;
         for n in neighbors {
             if !n.Online {
                 continue;
             };
             let ip = n.TailscaleIPs[0].clone();
             let endpoint = format!("http://{}:{}/gossip", ip, PORT);
-            // TODO: 
-            // format body
-            // actually post data
+            let clock = clock.clone();
+            let entry = entry.clone();
+            let body = Gossip {
+                clock,
+                ttl,
+                entry
+            };
+            let _resp = client.post(endpoint)
+                .json(&body)
+                .send()
+                .await;
+
+            // limit the number of messages
+            sent += 1;
+            if sent > MAX_PER_ROUND {
+                break;
+            }
         }
     }
 
@@ -145,7 +170,7 @@ impl Node {
 
     async fn is_outdated(
         &self,
-        incoming: &HashMap<String, u64>,
+        incoming: &Clock,
         tx: &mut mpsc::Sender<DBMessage>,
     ) -> bool {
         let clock = self.get_clock(tx).await;
@@ -160,7 +185,7 @@ impl Node {
     async fn update_values(
         &self,
         incoming_updates: &Vec<(ClipboardEntry, String)>,
-        incoming_clock: &HashMap<String, u64>,
+        incoming_clock: &Clock,
         tx: &mut mpsc::Sender<DBMessage>,
     ) {
         for update in incoming_updates {
@@ -172,8 +197,8 @@ impl Node {
                     let i = (*i).clone();
                     let i = i.into();
                     DBMessage {
-                        cmd: crate::db::DBCommand::CopyImage {
-                            image: i,
+                        cmd: crate::db::DBCommand::CopyData {
+                            data: ClipboardEntry::Image(i),
                             timestamp,
                             local: false
                         },
@@ -181,8 +206,8 @@ impl Node {
                     }
                 }
                 ClipboardEntry::Text(t) => DBMessage {
-                    cmd: crate::db::DBCommand::CopyText {
-                        text: t.clone(),
+                    cmd: crate::db::DBCommand::CopyData {
+                        data: ClipboardEntry::Text(t.clone()),
                         timestamp,
                         local: false
                     },
@@ -244,6 +269,8 @@ impl Node {
                         n.clone()
                     };
 
+                    let client = reqwest::Client::new();
+
                     for i in 0..neighbors.len() {
                         // no point in pinging if they are offline anyway
                         if !neighbors[i].Online {
@@ -251,8 +278,8 @@ impl Node {
                         }
                         let ip = neighbors[i].TailscaleIPs[0].clone();
                         let endpoint = format!("http://{}:{}/clock", ip, PORT);
-                        let incoming_clock = match reqwest::get(&endpoint).await {
-                            Ok(response) => match response.json::<HashMap<String, u64>>().await {
+                        let incoming_clock = match client.get(&endpoint).send().await {
+                            Ok(response) => match response.json::<Clock>().await {
                                 Ok(clock) => clock,
                                 Err(e) => {
                                     eprintln!("Failed to parse JSON from {}: {}", endpoint, e);
@@ -269,7 +296,7 @@ impl Node {
                         if self.is_outdated(&incoming_clock, &mut tx).await {
                             // we must update our entries first, THEN our keys
                             let endpoint = format!("http://{}:{}/recent_clipboard", ip, PORT);
-                            let incoming_updates = reqwest::get(endpoint)
+                            let incoming_updates = client.get(endpoint).send()
                                 .await
                                 .expect("failed to send message")
                                 .json()
@@ -293,14 +320,19 @@ impl Node {
                         .expect("failed to reply");
                     }
                 ControlCommand::GetClock => {
-                    let mut clone_tx = tx.clone();
-                    let data = self.get_clock(&mut clone_tx).await;
+                    let data = self.get_clock(&mut tx).await;
                     msg.sender
                         .send(Ok(Response::Clock { data }))
                         .expect("failed to reply");
                     }
-                ControlCommand::Transmit { data } => {
-                    self.gossip(data, MAX_PER_ROUND, TTL).await;
+                ControlCommand::Transmit { data, ttl } => {
+                    let ttl = match ttl {
+                        Some(x) => x,
+                        None => TTL
+                    };
+                    self.gossip(data, MAX_PER_ROUND, ttl, &mut tx).await;
+
+                    msg.sender.send(Ok(Response::OK)).expect("failed to reply");
                 }
                 _ => {
                     msg.sender.send(Ok(Response::OK)).expect("failed to reply");
@@ -313,7 +345,10 @@ impl Node {
 #[derive(Debug)]
 pub enum ControlCommand {
     AntiEntropy,
-    Transmit {},
+    Transmit {
+        data: ClipboardEntry,
+        ttl: Option<u64>
+    },
     GetNeighbors,
     GetClock,
 }
@@ -322,7 +357,7 @@ pub enum ControlCommand {
 pub enum Response {
     OK,
     Neighbors { info: Vec<PeerInfo> },
-    Clock { data: HashMap<String, u64> },
+    Clock { data: Clock },
 }
 
 #[derive(Debug)]
