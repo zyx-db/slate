@@ -137,6 +137,7 @@ async fn handle_client(
                     file_name: file_name.to_string(),
                     file_path: file_path.to_string(),
                     timestamp: Ulid::new(),
+                    local: true,
                 },
                 sender: x,
             };
@@ -213,6 +214,7 @@ async fn handle_client(
                         cmd: DBCommand::CopyText {
                             text,
                             timestamp: Ulid::new(),
+                            local: true
                         },
                         sender: x,
                     })
@@ -221,6 +223,7 @@ async fn handle_client(
                         cmd: DBCommand::CopyImage {
                             image: image.into(),
                             timestamp: Ulid::new(),
+                            local: true
                         },
                         sender: x,
                     })
@@ -229,6 +232,7 @@ async fn handle_client(
                         cmd: DBCommand::CopyText {
                             text,
                             timestamp: Ulid::new(),
+                            local: true
                         },
                         sender: x,
                     })

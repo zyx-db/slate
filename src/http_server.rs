@@ -47,9 +47,6 @@ async fn recent_clipboard(
 
     let resp = y.await.expect("failed to read response");
     if let Ok(crate::db::Response::Recent { values }) = resp {
-        for x in &values {
-            println!("{:?}", x);
-        }
         Json(values)
     } else {
         Json(Vec::new())
@@ -66,9 +63,6 @@ async fn neighbors(Extension(tx): Extension<Sender<ControlMessage>>) -> Json<Vec
 
     let resp = y.await.expect("failed to read response");
     if let Ok(crate::control_plane::Response::Neighbors { info }) = resp {
-        for x in &info {
-            println!("{:?}", x);
-        }
         Json(info)
     } else {
         Json(Vec::new())

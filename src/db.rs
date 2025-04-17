@@ -131,8 +131,11 @@ impl Database {
         filename: &str,
         filepath: &str,
         timestamp: Ulid,
+        local: bool
     ) -> Result<(), rusqlite::Error> {
-        self.inc_self_counter()?;
+        if local {
+            self.inc_self_counter()?;
+        }
         println!("opening file from {} with name {}", filepath, filename);
         let mut file = fs::File::open(filepath).expect("cannot open file");
         let mut file_data = Vec::new();
@@ -194,8 +197,10 @@ impl Database {
         result
     }
 
-    fn save_text(&self, text: String, timestamp: Ulid) -> Result<usize, rusqlite::Error> {
-        self.inc_self_counter()?;
+    fn save_text(&self, text: String, timestamp: Ulid, local: bool) -> Result<usize, rusqlite::Error> {
+        if local {
+            self.inc_self_counter()?;
+        }
         let query = "
             INSERT INTO clipboard (key, text_data) VALUES (?1, ?2)
         ";
@@ -211,8 +216,11 @@ impl Database {
         &self,
         image: SerializableImage,
         timestamp: Ulid,
+        local: bool,
     ) -> Result<usize, rusqlite::Error> {
-        self.inc_self_counter()?;
+        if local {
+            self.inc_self_counter()?;
+        }
         let query = "
             INSERT INTO clipboard (key, width, height, image_content) VALUES (?1, ?2, ?3, ?4)
         ";
@@ -324,8 +332,9 @@ impl Database {
                     file_name,
                     file_path,
                     timestamp,
+                    local,
                 } => {
-                    let result = self.upload_file(&file_name, &file_path, timestamp);
+                    let result = self.upload_file(&file_name, &file_path, timestamp, local);
                     match result {
                         Ok(()) => {
                             tx.send(Ok(Response::Success))
@@ -350,8 +359,8 @@ impl Database {
                         }
                     }
                 }
-                CopyImage { image, timestamp } => {
-                    let result = self.save_image(image, timestamp);
+                CopyImage { image, timestamp, local} => {
+                    let result = self.save_image(image, timestamp, local);
                     match result {
                         Ok(_) => {
                             tx.send(Ok(Response::Success))
@@ -363,8 +372,8 @@ impl Database {
                         }
                     }
                 }
-                CopyText { text, timestamp } => {
-                    let result = self.save_text(text, timestamp);
+                CopyText { text, timestamp, local } => {
+                    let result = self.save_text(text, timestamp, local);
                     match result {
                         Ok(_) => {
                             tx.send(Ok(Response::Success))
@@ -485,6 +494,7 @@ pub enum DBCommand {
         file_name: String,
         file_path: String,
         timestamp: Ulid,
+        local: bool
     },
     Download {
         download_path: String,
@@ -493,10 +503,12 @@ pub enum DBCommand {
     CopyImage {
         image: SerializableImage,
         timestamp: Ulid,
+        local: bool,
     },
     CopyText {
         text: String,
         timestamp: Ulid,
+        local: bool
     },
     Paste {
         offset: usize,

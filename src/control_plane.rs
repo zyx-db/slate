@@ -21,9 +21,9 @@ use hyperlocal::{UnixClientExt, UnixConnector, Uri};
 use crate::db::{ClipboardEntry, DBMessage};
 
 const REFRESH_NEIGHBORS_TIMEOUT: u64 = 10 * 60 * 1000;
-const ANTI_ENTROPY_TIMEOUT_MS: u64 = 600 * 1 * 1000;
+// const ANTI_ENTROPY_TIMEOUT_MS: u64 = 600 * 1 * 1000;
 const PORT: u64 = 3000;
-// const ANTI_ENTROPY_TIMEOUT_MS: u64 = 1 * 60 * 1000;
+const ANTI_ENTROPY_TIMEOUT_MS: u64 = 1 * 60 * 1000;
 
 pub struct Node {
     host_name: String,
@@ -161,6 +161,7 @@ impl Node {
                         cmd: crate::db::DBCommand::CopyImage {
                             image: i,
                             timestamp,
+                            local: false
                         },
                         sender: x,
                     }
@@ -169,6 +170,7 @@ impl Node {
                     cmd: crate::db::DBCommand::CopyText {
                         text: t.clone(),
                         timestamp,
+                        local: false
                     },
                     sender: x,
                 },
@@ -178,6 +180,9 @@ impl Node {
         }
 
         let mut updating_clock = self.get_clock(tx).await;
+        println!(
+            "READING THE OLD CLOCK AS {:?}", updating_clock
+            );
         for (key, value) in incoming_clock {
             let new_value = match updating_clock.get(key) {
                 Some(old_value) => {
@@ -191,6 +196,9 @@ impl Node {
             };
             let _ = updating_clock.insert(key.clone(), new_value);
         }
+        println!(
+            "SAVING THE NEW CLOCK AS {:?}", updating_clock
+            );
         self.save_clock(updating_clock, tx).await;
     }
 
