@@ -1,13 +1,14 @@
 use arboard::ImageData;
 use rusqlite::{params, Connection};
-use ulid::Ulid;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::{fs, io::Read};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot::Sender;
+use ulid::Ulid;
 use zstd::stream::encode_all;
-use serde::{Deserialize, Serialize};
 
 const DATABASE_PATH: &str = "/tmp/slate_daemon.sqlite";
 
@@ -66,6 +67,11 @@ impl Database {
                 height INTEGER,
                 image_content BLOB 
             );
+            CREATE TABLE IF NOT EXISTS clock (
+                key TEXT NOT NULL PRIMARY KEY,
+                self BOOLEAN NOT NULL,
+                time INTEGER NOT NULL
+            )
         ";
 
         connection.execute_batch(sql)?;
@@ -73,7 +79,60 @@ impl Database {
         Ok(Database { connection })
     }
 
-    fn upload_file(&self, filename: &str, filepath: &str, timestamp: Ulid) -> Result<(), String> {
+    fn sync_clock(&self, clock_map: &HashMap<String, u64>) -> Result<(), rusqlite::Error> {
+        if clock_map.is_empty() {
+            return Ok(());
+        }
+
+        // Create the parameterized query for non-self entries only
+        let placeholders: Vec<_> = (0..clock_map.len())
+            .map(|i| format!("(?{}, FALSE, ?{})", i * 2 + 1, i * 2 + 2))
+            .collect();
+
+        let sql = format!(
+            "INSERT INTO clock (key, self, time) VALUES {} 
+             ON CONFLICT(key) DO UPDATE SET time = excluded.time 
+             WHERE self = FALSE", // Only update non-self entries
+            placeholders.join(",")
+        );
+
+        // Convert HashMap entries to parameters (excluding self entries)
+        let params: Vec<_> = clock_map
+            .iter()
+            .flat_map(|(k, v)| vec![k as &dyn rusqlite::ToSql, v as &dyn rusqlite::ToSql])
+            .collect();
+
+        self.connection.execute(&sql, &params[..])?;
+        Ok(())
+    }
+
+    fn load_clock(&self) -> Result<HashMap<String, u64>, rusqlite::Error> {
+        let mut stmt = self.connection.prepare("SELECT key, time FROM clock")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })?;
+
+        let mut clock_map = HashMap::new();
+        for row in rows {
+            let (key, time) = row?;
+            clock_map.insert(key, time);
+        }
+        Ok(clock_map)
+    }
+
+    fn inc_self_counter(&self) -> Result<(), rusqlite::Error> {
+        let sql = "UPDATE clock SET time = time + 1 WHERE self = TRUE";
+        self.connection.execute(sql, [])?;
+        Ok(())
+    }
+
+    fn upload_file(
+        &self,
+        filename: &str,
+        filepath: &str,
+        timestamp: Ulid,
+    ) -> Result<(), rusqlite::Error> {
+        self.inc_self_counter()?;
         println!("opening file from {} with name {}", filepath, filename);
         let mut file = fs::File::open(filepath).expect("cannot open file");
         let mut file_data = Vec::new();
@@ -136,6 +195,7 @@ impl Database {
     }
 
     fn save_text(&self, text: String, timestamp: Ulid) -> Result<usize, rusqlite::Error> {
+        self.inc_self_counter()?;
         let query = "
             INSERT INTO clipboard (key, text_data) VALUES (?1, ?2)
         ";
@@ -147,7 +207,12 @@ impl Database {
         statement.execute(params![timestamp.to_string(), text])
     }
 
-    fn save_image(&self, image: SerializableImage, timestamp: Ulid) -> Result<usize, rusqlite::Error> {
+    fn save_image(
+        &self,
+        image: SerializableImage,
+        timestamp: Ulid,
+    ) -> Result<usize, rusqlite::Error> {
+        self.inc_self_counter()?;
         let query = "
             INSERT INTO clipboard (key, width, height, image_content) VALUES (?1, ?2, ?3)
         ";
@@ -156,7 +221,12 @@ impl Database {
             .prepare(query)
             .expect("unable to prepare query");
 
-        statement.execute(params![timestamp.to_string(), image.width, image.height, image.bytes])
+        statement.execute(params![
+            timestamp.to_string(),
+            image.width,
+            image.height,
+            image.bytes
+        ])
     }
 
     fn read_clipboard(&self, offset: usize) -> Result<ClipboardEntry, rusqlite::Error> {
@@ -233,6 +303,16 @@ impl Database {
         rows.collect()
     }
 
+    pub fn insert_self(&self, host_name: String) -> Result<(), rusqlite::Error> {
+        let sql = "
+            INSERT INTO clock (key, self, time) VALUES (?1, TRUE, 0)
+            ON CONFLICT(key) DO NOTHING
+        ";
+
+        self.connection.execute(&sql, params![host_name])?;
+        Ok(())
+    }
+
     pub async fn listen(self, mut rx: Receiver<DBMessage>) {
         println!("db started!");
         while let Some(msg) = rx.recv().await {
@@ -243,16 +323,17 @@ impl Database {
                 Upload {
                     file_name,
                     file_path,
-                    timestamp
+                    timestamp,
                 } => {
                     let result = self.upload_file(&file_name, &file_path, timestamp);
                     match result {
                         Ok(()) => {
-                            tx.send(Ok(Response::UploadSuccessful))
+                            tx.send(Ok(Response::Success))
                                 .expect("failed to send response");
                         }
                         Err(e) => {
-                            tx.send(Err(e)).expect("failed to send response");
+                            tx.send(Err(e.to_string()))
+                                .expect("failed to send response");
                         }
                     }
                 }
@@ -273,7 +354,7 @@ impl Database {
                     let result = self.save_image(image, timestamp);
                     match result {
                         Ok(_) => {
-                            tx.send(Ok(Response::CopySuccessful))
+                            tx.send(Ok(Response::Success))
                                 .expect("failed to send response");
                         }
                         Err(e) => {
@@ -286,7 +367,7 @@ impl Database {
                     let result = self.save_text(text, timestamp);
                     match result {
                         Ok(_) => {
-                            tx.send(Ok(Response::CopySuccessful))
+                            tx.send(Ok(Response::Success))
                                 .expect("failed to send response");
                         }
                         Err(e) => {
@@ -325,7 +406,7 @@ impl Database {
                     }
 
                     if completed {
-                        tx.send(Ok(Response::PasteSuccessful))
+                        tx.send(Ok(Response::Success))
                             .expect("failed to send response");
                     } else {
                         tx.send(Err("failed to paste".to_string()))
@@ -342,18 +423,46 @@ impl Database {
                             .expect("failed to send response");
                     }
                 },
-                Recent { length } => {
-                    match self.get_recent(length) {
-                        Ok (res) => {
-                            tx.send(Ok(Response::Recent { values: res }))
-                                .expect("failed to send response");
-                        }
-                        Err (e) => {
-                            tx.send(Err(e.to_string()))
-                                .expect("failed to send response");
-                        }
+                Recent { length } => match self.get_recent(length) {
+                    Ok(res) => {
+                        tx.send(Ok(Response::Recent { values: res }))
+                            .expect("failed to send response");
                     }
-                }
+                    Err(e) => {
+                        tx.send(Err(e.to_string()))
+                            .expect("failed to send response");
+                    }
+                },
+                InsertSelf { host_name } => match self.insert_self(host_name) {
+                    Ok(()) => {
+                        tx.send(Ok(Response::Success))
+                            .expect("failed to send response");
+                    }
+                    Err(e) => {
+                        tx.send(Err(e.to_string()))
+                            .expect("failed to send response");
+                    }
+                },
+                LoadClock => match self.load_clock() {
+                    Ok(data) => {
+                        tx.send(Ok(Response::Clock { data }))
+                            .expect("failed to send response");
+                    }
+                    Err(e) => {
+                        tx.send(Err(e.to_string()))
+                            .expect("failed to send response");
+                    }
+                },
+                SaveClock { clock } => match self.sync_clock(&clock) {
+                    Ok(()) => {
+                        tx.send(Ok(Response::Success))
+                            .expect("failed to send response");
+                    }
+                    Err(e) => {
+                        tx.send(Err(e.to_string()))
+                            .expect("failed to send response");
+                    }
+                },
                 _ => {}
             }
         }
@@ -398,16 +507,30 @@ pub enum DBCommand {
     Recent {
         length: u64,
     },
+    InsertSelf {
+        host_name: String,
+    },
+    LoadClock,
+    SaveClock {
+        clock: HashMap<String, u64>,
+    },
 }
 
 #[derive(Debug)]
 pub enum Response {
-    UploadSuccessful,
-    CopySuccessful,
-    PasteSuccessful,
-    Files { names: Vec<String> },
-    History { names: Vec<String> },
-    Recent { values: Vec<(ClipboardEntry, String)> }
+    Success,
+    Files {
+        names: Vec<String>,
+    },
+    History {
+        names: Vec<String>,
+    },
+    Recent {
+        values: Vec<(ClipboardEntry, String)>,
+    },
+    Clock {
+        data: HashMap<String, u64>,
+    },
 }
 
 #[derive(Debug)]

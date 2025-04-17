@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -5,20 +6,19 @@ use std::{
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::{
+    net::UnixStream,
     sync::mpsc::Receiver,
     time::{sleep, Duration},
-    net::UnixStream,
 };
 use ulid::Ulid;
-use serde::{Serialize, Deserialize};
 
-use http::{Request, header::HOST};
+use http::{header::HOST, Request};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper_util::client::legacy::Client;
 use hyperlocal::{UnixClientExt, UnixConnector, Uri};
 
-use crate::db::{DBMessage, ClipboardEntry};
+use crate::db::{ClipboardEntry, DBMessage};
 
 const REFRESH_NEIGHBORS_TIMEOUT: u64 = 10 * 60 * 1000;
 const ANTI_ENTROPY_TIMEOUT_MS: u64 = 600 * 1 * 1000;
@@ -28,7 +28,6 @@ const PORT: u64 = 3000;
 pub struct Node {
     host_name: String,
     neighbors: Arc<Mutex<Vec<PeerInfo>>>,
-    clock: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -56,8 +55,12 @@ impl Node {
             let res = client.request(req).await.unwrap();
             println!("tailscale local api response status {}", res.status());
             let body = res.collect().await.unwrap().to_bytes();
-            println!("tailscale local api body {}", String::from_utf8_lossy(&body));
-            let json_value: serde_json::Value = serde_json::from_slice(&body).expect("failed to parse json");
+            println!(
+                "tailscale local api body {}",
+                String::from_utf8_lossy(&body)
+            );
+            let json_value: serde_json::Value =
+                serde_json::from_slice(&body).expect("failed to parse json");
 
             // Extract just the "Peer" object
             let name_json = &json_value["Self"]["HostName"];
@@ -66,11 +69,29 @@ impl Node {
         Node {
             host_name,
             neighbors: Arc::new(Mutex::new(Vec::new())),
-            clock: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    async fn get_clock(&self) {}
+    async fn get_clock(&self, tx: &mut mpsc::Sender<DBMessage>) -> HashMap<String, u64> {
+        let (x, y) = oneshot::channel();
+        let msg = DBMessage {
+            cmd: crate::db::DBCommand::LoadClock,
+            sender: x,
+        };
+        tx.send(msg).await.expect("failed to send db msg");
+
+        let response = y.await.expect("failed to recieve msg");
+
+        if let Ok(crate::db::Response::Clock { data }) = response {
+            data
+        } else {
+            eprintln!("{}", response.err().unwrap());
+            HashMap::new()
+        }
+    }
+
+    // TODO
+    async fn save_clock(&self) {}
 
     async fn read(&self) {}
 
@@ -93,8 +114,12 @@ impl Node {
         let res = client.request(req).await.unwrap();
         println!("tailscale local api response status {}", res.status());
         let body = res.collect().await.unwrap().to_bytes();
-        println!("tailscale local api body {}", String::from_utf8_lossy(&body));
-        let json_value: serde_json::Value = serde_json::from_slice(&body).expect("failed to parse json");
+        println!(
+            "tailscale local api body {}",
+            String::from_utf8_lossy(&body)
+        );
+        let json_value: serde_json::Value =
+            serde_json::from_slice(&body).expect("failed to parse json");
 
         // Extract just the "Peer" object
         let peers_json = &json_value["Peer"];
@@ -110,64 +135,87 @@ impl Node {
         cur.extend(neighbors);
     }
 
-    fn is_outdated(&self, incoming: &HashMap<String, u64>) -> bool {
-        let clock = self.clock.lock().expect("unable to acquire lock");
-        incoming.iter().any(|(key, &incoming_val)| {
-            match clock.get(key) {
+    async fn is_outdated(
+        &self,
+        incoming: &HashMap<String, u64>,
+        tx: &mut mpsc::Sender<DBMessage>,
+    ) -> bool {
+        let clock = self.get_clock(tx).await;
+        incoming
+            .iter()
+            .any(|(key, &incoming_val)| match clock.get(key) {
                 Some(&local_val) => incoming_val > local_val,
-                None => true
-            }
-        })
+                None => true,
+            })
     }
 
-    async fn update_values(&self, incoming_updates: &Vec<(ClipboardEntry, String)>, incoming_clock: &HashMap<String, u64>, tx: &mut mpsc::Sender<DBMessage>) {
+    async fn update_values(
+        &self,
+        incoming_updates: &Vec<(ClipboardEntry, String)>,
+        incoming_clock: &HashMap<String, u64>,
+        tx: &mut mpsc::Sender<DBMessage>,
+    ) {
         for update in incoming_updates {
             let (entry, timestamp) = update;
             let timestamp = Ulid::from_string(&timestamp).expect("failed to parse ulid");
             let (x, y) = oneshot::channel();
-            let msg = match entry{
-                ClipboardEntry::Image( i ) => {
+            let msg = match entry {
+                ClipboardEntry::Image(i) => {
                     let i = (*i).clone();
                     let i = i.into();
                     DBMessage {
-                        cmd: crate::db::DBCommand::CopyImage { image: i, timestamp },
-                        sender: x
-                    } 
-                },
-                ClipboardEntry::Text ( t ) => {
-                    DBMessage {
-                        cmd: crate::db::DBCommand::CopyText { text: t.clone(), timestamp },
-                        sender: x
-                    } 
+                        cmd: crate::db::DBCommand::CopyImage {
+                            image: i,
+                            timestamp,
+                        },
+                        sender: x,
+                    }
                 }
+                ClipboardEntry::Text(t) => DBMessage {
+                    cmd: crate::db::DBCommand::CopyText {
+                        text: t.clone(),
+                        timestamp,
+                    },
+                    sender: x,
+                },
             };
             tx.send(msg).await.expect("couldnt send msg");
-            let _ = y.await.expect("failed to read response"); 
+            let _ = y.await.expect("failed to read response");
         }
 
-        let mut updating_clock = self.clock.lock().expect("failed to acquire lock");
+        let mut updating_clock = self.get_clock(tx).await;
         for (key, value) in incoming_clock {
             let new_value = match updating_clock.get(key) {
-                Some( old_value ) => {
+                Some(old_value) => {
                     if old_value > value {
                         *old_value
-                    }
-                    else {
+                    } else {
                         *value
                     }
                 }
-                None => *value
+                None => *value,
             };
             let _ = updating_clock.insert(key.clone(), new_value);
         }
+        self.save_clock().await;
     }
 
-    pub async fn listen(
-        &self,
-        mut rx: Receiver<ControlMessage>,
-        mut tx: mpsc::Sender<DBMessage>,
-    ) {
+    pub async fn listen(&self, mut rx: Receiver<ControlMessage>, mut tx: mpsc::Sender<DBMessage>) {
         println!("control plane started!");
+
+        // init row, if needed
+        {
+            let (x, y) = oneshot::channel();
+            let msg = DBMessage {
+                cmd: crate::db::DBCommand::InsertSelf {
+                    host_name: self.host_name.clone(),
+                },
+                sender: x,
+            };
+            tx.send(msg).await.expect("failed to init row");
+            let status = y.await.expect("failed to recieve msg");
+            status.expect("did not create self row?");
+        }
 
         //let tx2 = tx.clone();
         //task::spawn(async move {
@@ -189,19 +237,26 @@ impl Node {
                         println!("{:?}", neighbors[i]);
                         // no point in pinging if they are offline anyway
                         if !neighbors[i].Online {
-                            continue
+                            continue;
                         }
                         let ip = neighbors[i].TailscaleIPs[0].clone();
                         let endpoint = format!("http://{}:{}/clock", ip, PORT);
-                        let incoming_clock = reqwest::get(endpoint)
-                            .await
-                            .expect("failed to send message")
-                            .json::<HashMap<String, u64>>()
-                            .await
-                            .expect("failed to parse json");
+                        let incoming_clock = match reqwest::get(&endpoint).await {
+                            Ok(response) => match response.json::<HashMap<String, u64>>().await {
+                                Ok(clock) => clock,
+                                Err(e) => {
+                                    eprintln!("Failed to parse JSON from {}: {}", endpoint, e);
+                                    continue;
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!("Failed to send request to {}: {}", endpoint, e);
+                                continue;
+                            }
+                        };
 
                         // the incoming clock is newer
-                        if self.is_outdated(&incoming_clock) {
+                        if self.is_outdated(&incoming_clock, &mut tx).await {
                             // we must update our entries first, THEN our keys
                             let endpoint = format!("http://{}:{}/recent_clipboard", ip, PORT);
                             // TODO: actually parse / transmit data
@@ -212,7 +267,8 @@ impl Node {
                                 .await
                                 .expect("failed to parse json");
 
-                            self.update_values(&incoming_updates, &incoming_clock, &mut tx).await;
+                            self.update_values(&incoming_updates, &incoming_clock, &mut tx)
+                                .await;
                         }
                     }
                     msg.sender.send(Ok(Response::OK)).expect("failed to reply");
@@ -223,7 +279,16 @@ impl Node {
                         let n = self.neighbors.lock().expect("failed to acquire lock");
                         n.clone()
                     };
-                    msg.sender.send(Ok(Response::Neighbors { info })).expect("failed to reply");
+                    msg.sender
+                        .send(Ok(Response::Neighbors { info }))
+                        .expect("failed to reply");
+                }
+                ControlCommand::GetClock => {
+                    let mut clone_tx = tx.clone();
+                    let data = self.get_clock(&mut clone_tx).await;
+                    msg.sender
+                        .send(Ok(Response::Clock { data }))
+                        .expect("failed to reply");
                 }
                 _ => {
                     msg.sender.send(Ok(Response::OK)).expect("failed to reply");
@@ -238,12 +303,14 @@ pub enum ControlCommand {
     AntiEntropy,
     Transmit {},
     GetNeighbors,
+    GetClock,
 }
 
 #[derive(Debug)]
 pub enum Response {
     OK,
-    Neighbors {info: Vec<PeerInfo>}
+    Neighbors { info: Vec<PeerInfo> },
+    Clock { data: HashMap<String, u64> },
 }
 
 #[derive(Debug)]

@@ -210,17 +210,26 @@ async fn handle_client(
             let msg = {
                 if let Ok(text) = clipboard.get_text() {
                     Some(DBMessage {
-                        cmd: DBCommand::CopyText { text, timestamp: Ulid::new() },
+                        cmd: DBCommand::CopyText {
+                            text,
+                            timestamp: Ulid::new(),
+                        },
                         sender: x,
                     })
                 } else if let Ok(image) = clipboard.get_image() {
                     Some(DBMessage {
-                        cmd: DBCommand::CopyImage { image: image.into(), timestamp: Ulid::new() },
+                        cmd: DBCommand::CopyImage {
+                            image: image.into(),
+                            timestamp: Ulid::new(),
+                        },
                         sender: x,
                     })
                 } else if let Ok(text) = fallback_get_clipboard_hyprland() {
                     Some(DBMessage {
-                        cmd: DBCommand::CopyText { text, timestamp: Ulid::new() },
+                        cmd: DBCommand::CopyText {
+                            text,
+                            timestamp: Ulid::new(),
+                        },
                         sender: x,
                     })
                 } else {
@@ -244,6 +253,7 @@ async fn handle_client(
                         };
                         // doesnt matter if it fails to go through, we have anti entropy in place
                         let _ = cp_tx.send(msg).await;
+                        let _resp = y.await;
                         format!("successfully copied to db")
                     }
                     Err(e) => {
