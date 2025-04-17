@@ -90,8 +90,16 @@ impl Node {
         }
     }
 
-    // TODO
-    async fn save_clock(&self) {}
+    async fn save_clock(&self, clock: HashMap<String, u64>, tx: &mut mpsc::Sender<DBMessage>) {
+        let (x, y) = oneshot::channel();
+        let msg = DBMessage {
+            cmd: crate::db::DBCommand::SaveClock { clock },
+            sender: x,
+        };
+        tx.send(msg).await.expect("failed to send db message");
+
+        let _ = y.await;
+    }
 
     async fn read(&self) {}
 
@@ -197,7 +205,7 @@ impl Node {
             };
             let _ = updating_clock.insert(key.clone(), new_value);
         }
-        self.save_clock().await;
+        self.save_clock(updating_clock, tx).await;
     }
 
     pub async fn listen(&self, mut rx: Receiver<ControlMessage>, mut tx: mpsc::Sender<DBMessage>) {
