@@ -205,44 +205,13 @@ async fn handle_client(
                 }
             }
         }
+        // TODO:
+        // make it so control_plane::Transmit calls db
+        // remove this call to db in here
         "copy" => {
             println!("got msg copy");
             let mut clipboard = arboard::Clipboard::new().expect("unable to open clipboard");
-            let msg = {
-                if let Ok(text) = clipboard.get_text() {
-                    Some(DBMessage {
-                        cmd: DBCommand::CopyData {
-                            data: crate::db::ClipboardEntry::Text(text),
-                            timestamp: Ulid::new(),
-                            local: true
-                        },
-                        sender: x,
-                    })
-                } else if let Ok(image) = clipboard.get_image() {
-                    Some(DBMessage {
-                        cmd: DBCommand::CopyData {
-                            data: crate::db::ClipboardEntry::Image(image.into()),
-                            timestamp: Ulid::new(),
-                            local: true
-                        },
-                        sender: x,
-                    })
-                } else if let Ok(text) = fallback_get_clipboard_hyprland() {
-                    Some(DBMessage {
-                        cmd: DBCommand::CopyData {
-                            data: crate::db::ClipboardEntry::Text(text),
-                            timestamp: Ulid::new(),
-                            local: true
-                        },
-                        sender: x,
-                    })
-                } else {
-                    eprintln!("failed to get text: {}", clipboard.get_text().unwrap_err());
-                    None
-                }
-            };
 
-            // TODO: combine this and above
             let data = {
                 if let Ok(text) = clipboard.get_text() {
                     Some(crate::db::ClipboardEntry::Text(text))
@@ -252,6 +221,22 @@ async fn handle_client(
                     Some(crate::db::ClipboardEntry::Text(text))
                 } else {
                     eprintln!("failed to get text: {}", clipboard.get_text().unwrap_err());
+                    None
+                }
+            };
+
+            let msg = match &data {
+                Some(data) => {
+                    Some(DBMessage {
+                        cmd: DBCommand::CopyData {
+                            data: data.clone(),
+                            timestamp: Ulid::new(),
+                            local: true
+                        },
+                        sender: x,
+                    })
+                }
+                None => {
                     None
                 }
             };

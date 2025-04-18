@@ -6,7 +6,6 @@ use std::{
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::{
-    net::UnixStream,
     sync::mpsc::Receiver,
     time::{sleep, Duration},
 };
@@ -33,10 +32,22 @@ pub struct PeerInfo {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct Gossip {
-    clock: Clock,
-    entry: ClipboardEntry,
-    ttl: u64
+pub struct Gossip {
+    pub clock: Clock,
+    pub entry: ClipboardEntry,
+    pub ttl: u64
+}
+
+pub fn is_outdated(
+        clock: &Clock,
+        incoming: &Clock,
+) -> bool {
+    incoming
+        .iter()
+        .any(|(key, &incoming_val)| match clock.get(key) {
+            Some(&local_val) => incoming_val > local_val,
+            None => true,
+        })
 }
 
 pub struct Node {
@@ -133,7 +144,7 @@ impl Node {
 
             // limit the number of messages
             sent += 1;
-            if sent > MAX_PER_ROUND {
+            if sent > neighbor_count {
                 break;
             }
         }
@@ -174,12 +185,7 @@ impl Node {
         tx: &mut mpsc::Sender<DBMessage>,
     ) -> bool {
         let clock = self.get_clock(tx).await;
-        incoming
-            .iter()
-            .any(|(key, &incoming_val)| match clock.get(key) {
-                Some(&local_val) => incoming_val > local_val,
-                None => true,
-            })
+        is_outdated(&clock, incoming)
     }
 
     async fn update_values(
@@ -331,7 +337,6 @@ impl Node {
                         None => TTL
                     };
                     self.gossip(data, MAX_PER_ROUND, ttl, &mut tx).await;
-
                     msg.sender.send(Ok(Response::OK)).expect("failed to reply");
                 }
                 _ => {
