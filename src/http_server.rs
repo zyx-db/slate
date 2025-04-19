@@ -1,15 +1,16 @@
 use std::collections::HashMap;
 
-use axum::{response::IntoResponse, routing::{get, post}, Extension, Json, Router};
-use http::StatusCode;
-use tokio::sync::{
-    mpsc::Sender,
-    oneshot,
+use axum::{
+    response::IntoResponse,
+    routing::{get, post},
+    Extension, Json, Router,
 };
+use http::StatusCode;
+use tokio::sync::{mpsc::Sender, oneshot};
 
 use crate::{
-    control_plane::{PeerInfo, ControlMessage, Gossip},
-    db::{ClipboardEntry, DBMessage, Clock},
+    control_plane::{ControlMessage, Gossip, PeerInfo},
+    db::{ClipboardEntry, Clock, DBMessage},
 };
 
 async fn health_check() -> &'static str {
@@ -71,7 +72,7 @@ async fn neighbors(Extension(tx): Extension<Sender<ControlMessage>>) -> Json<Vec
 
 async fn gossip(
     Extension(tx): Extension<Sender<ControlMessage>>,
-    Json(payload): Json<Gossip>
+    Json(payload): Json<Gossip>,
 ) -> impl IntoResponse {
     println!("got request");
     let Gossip { clock, entry, ttl } = payload;
@@ -79,30 +80,30 @@ async fn gossip(
         let (x, y) = oneshot::channel();
         let msg = ControlMessage {
             cmd: crate::control_plane::ControlCommand::GetClock,
-            sender: x
+            sender: x,
         };
         tx.send(msg).await.expect("failed to send msg");
-        y
-            .await
+        y.await
             .expect("failed to recieve msg")
             .expect("could not get clock")
     };
     if let crate::control_plane::Response::Clock { data } = cur_clock {
         let mut res = StatusCode::OK;
         if crate::control_plane::is_outdated(&data, &clock) && ttl > 0 {
+            println!("inserting value!");
             let (x, y) = oneshot::channel();
             let msg = ControlMessage {
                 cmd: crate::control_plane::ControlCommand::Transmit {
-                    data: entry, ttl: Some(ttl - 1)
+                    data: entry,
+                    ttl: Some(ttl - 1),
+                    clock: Some(clock)
                 },
-                sender: x
+                sender: x,
             };
             tx.send(msg).await.expect("failed to send msg");
             let resp = y.await.expect("failed to send msg");
             res = match resp {
-                Ok(crate::control_plane::Response::OK) => {
-                    StatusCode::OK
-                },
+                Ok(crate::control_plane::Response::OK) => StatusCode::OK,
                 Err(e) => {
                     eprintln!("{}", e);
                     StatusCode::INTERNAL_SERVER_ERROR
@@ -113,8 +114,7 @@ async fn gossip(
             }
         };
         res
-    }
-    else {
+    } else {
         StatusCode::INTERNAL_SERVER_ERROR
     }
 }

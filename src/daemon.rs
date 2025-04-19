@@ -137,7 +137,7 @@ async fn handle_client(
                     file_name: file_name.to_string(),
                     file_path: file_path.to_string(),
                     timestamp: Ulid::new(),
-                    local: true,
+                    local: true
                 },
                 sender: x,
             };
@@ -205,9 +205,6 @@ async fn handle_client(
                 }
             }
         }
-        // TODO:
-        // make it so control_plane::Transmit calls db
-        // remove this call to db in here
         "copy" => {
             println!("got msg copy");
             let mut clipboard = arboard::Clipboard::new().expect("unable to open clipboard");
@@ -225,48 +222,19 @@ async fn handle_client(
                 }
             };
 
-            let msg = match &data {
-                Some(data) => {
-                    Some(DBMessage {
-                        cmd: DBCommand::CopyData {
-                            data: data.clone(),
-                            timestamp: Ulid::new(),
-                            local: true
-                        },
-                        sender: x,
-                    })
-                }
-                None => {
-                    None
-                }
+            let (x, y) = oneshot::channel();
+            let msg = ControlMessage {
+                cmd: ControlCommand::Transmit {
+                    data: data.unwrap(),
+                    ttl: None,
+                    clock: None
+                },
+                sender: x,
             };
-
-            if msg.is_none() {
-                format!("failed to copy")
-            } else if let Err(e) = tx.send(msg.unwrap()).await {
-                format!("unable to send message to db {}", e)
-            } else {
-                let response = y.await.expect("failed to read response");
-                match response {
-                    Ok(_) => {
-                        let (x, y) = oneshot::channel();
-                        let msg = ControlMessage {
-                            cmd: ControlCommand::Transmit {
-                                data: data.unwrap(),
-                                ttl: None
-                            },
-                            sender: x,
-                        };
-                        // doesnt matter if it fails to go through, we have anti entropy in place
-                        let _ = cp_tx.send(msg).await;
-                        let _resp = y.await;
-                        format!("successfully copied to db")
-                    }
-                    Err(e) => {
-                        format!("error copying to db: {}", e)
-                    }
-                }
-            }
+            // doesnt matter if it fails to go through, we have anti entropy in place
+            let _ = cp_tx.send(msg).await;
+            let _resp = y.await;
+            format!("successfully copied to db")
         }
         cmd if cmd.starts_with("paste ") => {
             let cmd = command.strip_prefix("paste ").unwrap();

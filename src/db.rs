@@ -132,7 +132,7 @@ impl Database {
         filename: &str,
         filepath: &str,
         timestamp: Ulid,
-        local: bool
+        local: bool,
     ) -> Result<(), rusqlite::Error> {
         if local {
             self.inc_self_counter()?;
@@ -198,7 +198,12 @@ impl Database {
         result
     }
 
-    fn save_text(&self, text: String, timestamp: Ulid, local: bool) -> Result<usize, rusqlite::Error> {
+    fn save_text(
+        &self,
+        text: String,
+        timestamp: Ulid,
+        local: bool,
+    ) -> Result<usize, rusqlite::Error> {
         if local {
             self.inc_self_counter()?;
         }
@@ -360,10 +365,14 @@ impl Database {
                         }
                     }
                 }
-                CopyData { data, timestamp, local} => {
+                CopyData {
+                    data,
+                    timestamp,
+                    local,
+                } => {
                     let result = match data {
                         ClipboardEntry::Text(t) => self.save_text(t, timestamp, local),
-                        ClipboardEntry::Image(i) => self.save_image(i, timestamp, local)
+                        ClipboardEntry::Image(i) => self.save_image(i, timestamp, local),
                     };
                     match result {
                         Ok(_) => {
@@ -485,7 +494,7 @@ pub enum DBCommand {
         file_name: String,
         file_path: String,
         timestamp: Ulid,
-        local: bool
+        local: bool,
     },
     Download {
         download_path: String,
@@ -494,7 +503,7 @@ pub enum DBCommand {
     CopyData {
         data: ClipboardEntry,
         timestamp: Ulid,
-        local: bool
+        local: bool,
     },
     Paste {
         offset: usize,

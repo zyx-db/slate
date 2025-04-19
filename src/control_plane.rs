@@ -9,15 +9,15 @@ use tokio::{
     sync::mpsc::Receiver,
     time::{sleep, Duration},
 };
-use ulid::Ulid;
 
 use http::{header::HOST, Request};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper_util::client::legacy::Client;
 use hyperlocal::{UnixClientExt, UnixConnector, Uri};
+use ulid::Ulid;
 
-use crate::db::{ClipboardEntry, DBMessage, Clock};
+use crate::db::{ClipboardEntry, Clock, DBMessage};
 
 const PORT: u64 = 3000;
 const ANTI_ENTROPY_TIMEOUT_MS: u64 = 3 * 60 * 1000;
@@ -35,13 +35,10 @@ pub struct PeerInfo {
 pub struct Gossip {
     pub clock: Clock,
     pub entry: ClipboardEntry,
-    pub ttl: u64
+    pub ttl: u64,
 }
 
-pub fn is_outdated(
-        clock: &Clock,
-        incoming: &Clock,
-) -> bool {
+pub fn is_outdated(clock: &Clock, incoming: &Clock) -> bool {
     incoming
         .iter()
         .any(|(key, &incoming_val)| match clock.get(key) {
@@ -114,7 +111,13 @@ impl Node {
         let _ = y.await;
     }
 
-    async fn gossip(&self, entry: ClipboardEntry, neighbor_count: u64, ttl: u64, tx: &mut mpsc::Sender<DBMessage>) {
+    async fn gossip(
+        &self,
+        entry: ClipboardEntry,
+        neighbor_count: u64,
+        ttl: u64,
+        tx: &mut mpsc::Sender<DBMessage>,
+    ) {
         self.reload_neighbors().await;
         let neighbors = {
             let n = self.neighbors.lock().expect("failed to acquire lock");
@@ -132,15 +135,8 @@ impl Node {
             let endpoint = format!("http://{}:{}/gossip", ip, PORT);
             let clock = clock.clone();
             let entry = entry.clone();
-            let body = Gossip {
-                clock,
-                ttl,
-                entry
-            };
-            let _resp = client.post(endpoint)
-                .json(&body)
-                .send()
-                .await;
+            let body = Gossip { clock, ttl, entry };
+            let _resp = client.post(endpoint).json(&body).send().await;
 
             // limit the number of messages
             sent += 1;
@@ -179,11 +175,7 @@ impl Node {
         cur.extend(neighbors);
     }
 
-    async fn is_outdated(
-        &self,
-        incoming: &Clock,
-        tx: &mut mpsc::Sender<DBMessage>,
-    ) -> bool {
+    async fn is_outdated(&self, incoming: &Clock, tx: &mut mpsc::Sender<DBMessage>) -> bool {
         let clock = self.get_clock(tx).await;
         is_outdated(&clock, incoming)
     }
@@ -206,7 +198,7 @@ impl Node {
                         cmd: crate::db::DBCommand::CopyData {
                             data: ClipboardEntry::Image(i),
                             timestamp,
-                            local: false
+                            local: false,
                         },
                         sender: x,
                     }
@@ -215,7 +207,7 @@ impl Node {
                     cmd: crate::db::DBCommand::CopyData {
                         data: ClipboardEntry::Text(t.clone()),
                         timestamp,
-                        local: false
+                        local: false,
                     },
                     sender: x,
                 },
@@ -225,9 +217,7 @@ impl Node {
         }
 
         let mut updating_clock = self.get_clock(tx).await;
-        println!(
-            "READING THE OLD CLOCK AS {:?}", updating_clock
-        );
+        println!("READING THE OLD CLOCK AS {:?}", updating_clock);
         for (key, value) in incoming_clock {
             let new_value = match updating_clock.get(key) {
                 Some(old_value) => {
@@ -241,9 +231,7 @@ impl Node {
             };
             let _ = updating_clock.insert(key.clone(), new_value);
         }
-        println!(
-            "SAVING THE NEW CLOCK AS {:?}", updating_clock
-        );
+        println!("SAVING THE NEW CLOCK AS {:?}", updating_clock);
         self.save_clock(updating_clock, tx).await;
     }
 
@@ -302,7 +290,9 @@ impl Node {
                         if self.is_outdated(&incoming_clock, &mut tx).await {
                             // we must update our entries first, THEN our keys
                             let endpoint = format!("http://{}:{}/recent_clipboard", ip, PORT);
-                            let incoming_updates = client.get(endpoint).send()
+                            let incoming_updates = client
+                                .get(endpoint)
+                                .send()
                                 .await
                                 .expect("failed to send message")
                                 .json()
@@ -324,20 +314,46 @@ impl Node {
                     msg.sender
                         .send(Ok(Response::Neighbors { info }))
                         .expect("failed to reply");
-                    }
+                }
                 ControlCommand::GetClock => {
                     let data = self.get_clock(&mut tx).await;
                     msg.sender
                         .send(Ok(Response::Clock { data }))
                         .expect("failed to reply");
-                    }
-                ControlCommand::Transmit { data, ttl } => {
-                    let ttl = match ttl {
-                        Some(x) => x,
-                        None => TTL
+                }
+                ControlCommand::Transmit { data, ttl, clock } => {
+                    let successfully_saved = {
+                        let (x, y) = oneshot::channel();
+                        let msg = DBMessage {
+                            cmd: crate::db::DBCommand::CopyData {
+                                data: data.clone(),
+                                timestamp: Ulid::new(),
+                                local: clock.is_none(),
+                            },
+                            sender: x,
+                        };
+                        tx.send(msg).await.expect("failed to msg db");
+                        let resp = y.await.expect("failed to read response");
+                        resp.is_ok()
                     };
-                    self.gossip(data, MAX_PER_ROUND, ttl, &mut tx).await;
-                    msg.sender.send(Ok(Response::OK)).expect("failed to reply");
+
+                    if successfully_saved {
+
+                        if clock.is_some() {
+                            self.save_clock(clock.unwrap(), &mut tx);
+                        };
+
+                        let ttl = match ttl {
+                            Some(x) => x,
+                            None => TTL,
+                        };
+                        self.gossip(data, MAX_PER_ROUND, ttl, &mut tx).await;
+                        msg.sender.send(Ok(Response::OK)).expect("failed to reply");
+                    } else {
+                        msg.sender
+                            .send(Err("failed to save".into()))
+                            .expect("failed to reply");
+                    }
                 }
                 _ => {
                     msg.sender.send(Ok(Response::OK)).expect("failed to reply");
@@ -352,7 +368,8 @@ pub enum ControlCommand {
     AntiEntropy,
     Transmit {
         data: ClipboardEntry,
-        ttl: Option<u64>
+        ttl: Option<u64>,
+        clock: Option<Clock>
     },
     GetNeighbors,
     GetClock,
